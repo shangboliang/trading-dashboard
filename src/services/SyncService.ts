@@ -7,7 +7,6 @@ import prisma from '@/lib/prisma';
 import { ApiKeyService } from './ApiKeyService';
 import { aggregateTradesToLegs, RawTrade } from '@/lib/trade-aggregator';
 import type { Exchange } from '@prisma/client';
-import logger from '@/lib/logger';
 
 // 不同交易所的 CCXT ID 映射
 const EXCHANGE_MAP: Record<Exchange, string> = {
@@ -31,8 +30,6 @@ export class SyncService {
    * 同步指定 API Key 的历史成交数据
    */
   static async syncApiKey(apiKeyId: number): Promise<SyncResult> {
-    logger.info({ apiKeyId }, '开始同步 API Key 数据');
-    
     // 更新状态为同步中
     await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING');
 
@@ -40,8 +37,6 @@ export class SyncService {
       // 获取 API Key (包含解密的凭证)
       const userId = await this.getUserIdByApiKey(apiKeyId);
       const apiKeyData = await ApiKeyService.getApiKeyById(apiKeyId, userId);
-
-      logger.info({ apiKeyId, exchange: apiKeyData.exchange }, '连接交易所');
 
       // 使用 CCXT 连接交易所
       const ccxt = await import('ccxt');
