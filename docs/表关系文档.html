@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>&#x4ea4;&#x6613;&#x590d;&#x76d8;&#x7cfb;&#x7edf; - &#x6570;&#x636e;&#x5e93;&#x8868;&#x7ed3;&#x6784;&#x6587;&#x6863;</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="交易复盘系统---数据库表结构文档">交易复盘系统 - 数据库表结构文档</h1>
+<h2 id="1-系统概述">1. 系统概述</h2>
+<p>本系统主要围绕<strong>加密货币交易复盘</strong>构建，核心数据流向为：通过用户授权的 <code>ApiKey</code>，利用定时任务或主动触发获取交易所的原始 <code>Trade</code>（成交记录），再通过内部引擎将其聚合为具有完整开平仓生命周期和盈亏数据的 <code>Leg</code>（头寸/持仓），最终供用户打上 <code>Tag</code>（标签）进行高阶复盘与总结。</p>
+<h2 id="2-实体关系图-纯文本-er-树">2. 实体关系图 (纯文本 ER 树)</h2>
+<pre><code class="language-text">[User] (核心用户主表)
+  │
+  ├─ 1对1 ── [UserSettings] (用户偏好配置)
+  │
+  ├─ 1对多 ── [Tag] (自定义复盘标签)
+  │            │
+  │            └─ 多对多 ── 关联 ── [Leg]
+  │
+  ├─ 1对多 ── [ApiKey] (绑定的交易所API凭证)
+  │            │
+  │            ├─ 1对多 ── [SyncLog] (每次拉取数据的审计日志)
+  │            │
+  │            └─ 1对多 ── [Trade] (从交易所拉取回来的原始订单)
+  │                          │
+  └─ 1对多 ── [Leg] (聚合头寸/复盘核心单元) 
+               │             │
+               └─ 包含多笔 ──┘
+</code></pre>
+<h2 id="3-核心表结构详解">3. 核心表结构详解</h2>
+<h3 id="31-用户与认证模块">3.1. 用户与认证模块</h3>
+<h4 id="user-用户主表"><code>User</code> (用户主表)</h4>
+<p>存储系统所有用户的核心认证与基础信息。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>id</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">PK, AutoInc</td>
+<td style="text-align:left">内部主键</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>uuid</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Unique, cuid</td>
+<td style="text-align:left">外部暴露的唯一标识</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>email</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Unique</td>
+<td style="text-align:left">登录邮箱</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>passwordHash</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Nullable</td>
+<td style="text-align:left">密码哈希</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>timezone</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Default &quot;UTC&quot;</td>
+<td style="text-align:left">用户首选时区，用于K线时间对齐</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>status</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">Default ACTIVE</td>
+<td style="text-align:left">账户状态 (ACTIVE/SUSPENDED/DELETED)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>role</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">Default USER</td>
+<td style="text-align:left">权限角色 (USER/ADMIN/PREMIUM)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="usersettings-用户偏好配置表"><code>UserSettings</code> (用户偏好配置表)</h4>
+<p>存储用户的 UI 设置和全局偏好。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>userId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">Unique, FK</td>
+<td style="text-align:left">关联的用户 ID</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>defaultTimeframe</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Default &quot;30d&quot;</td>
+<td style="text-align:left">仪表盘默认展示时间范围</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>currency</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Default &quot;USDT&quot;</td>
+<td style="text-align:left">全局计价/显示货币</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>theme</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Default &quot;dark&quot;</td>
+<td style="text-align:left">UI 主题模式</td>
+</tr>
+</tbody>
+</table>
+<h3 id="32-交易所数据接入模块">3.2. 交易所数据接入模块</h3>
+<h4 id="apikey-api-凭证表"><code>ApiKey</code> (API 凭证表)</h4>
+<p>管理用户绑定的各大交易所 API 密钥。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>userId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">FK</td>
+<td style="text-align:left">归属的用户 ID</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>name</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">备注名（如：币安主账户）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>exchange</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">交易所标识 (BINANCE, OKX 等)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>apiKey</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">API 公钥 (加密存储)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>apiSecret</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">API 密钥 (加密存储)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>isVerified</code></td>
+<td style="text-align:left">Boolean</td>
+<td style="text-align:left">Default false</td>
+<td style="text-align:left">是否已通过连通性验证</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>syncStatus</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">Default PENDING</td>
+<td style="text-align:left">当前同步状态 (PENDING/SYNCING/COMPLETED/FAILED)</td>
+</tr>
+</tbody>
+</table>
+<h4 id="synclog-数据同步日志表"><code>SyncLog</code> (数据同步日志表)</h4>
+<p>记录每次后台通过 API 抓取数据的成功与失败明细，用于审计与排错。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>apiKeyId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">FK</td>
+<td style="text-align:left">关联的 API Key ID</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>status</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">任务最终运行状态</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>tradesImported</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">Default 0</td>
+<td style="text-align:left">本次成功写入的新原始交易数</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>legsCreated</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">Default 0</td>
+<td style="text-align:left">本次运算新创建的头寸数量</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>errorMessage</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Nullable, Text</td>
+<td style="text-align:left">抓取失败时的错误信息简述</td>
+</tr>
+</tbody>
+</table>
+<h3 id="33-核心交易复盘引擎模块">3.3. 核心交易复盘引擎模块</h3>
+<h4 id="trade-原始成交记录表"><code>Trade</code> (原始成交记录表)</h4>
+<p>直接从交易所接口拉取回来的不可变底稿数据。<strong>这是系统的数据基石。</strong></p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>id</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">PK</td>
+<td style="text-align:left">交易所返回的真实 Trade ID</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>apiKeyId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">FK</td>
+<td style="text-align:left">抓取来源的 API Key</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>legId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">FK, Nullable</td>
+<td style="text-align:left">挂载到的聚合头寸(Leg) ID</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>symbol</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">交易对 (如 &quot;BTC/USDT:USDT&quot;)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>side</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">交易方向 (BUY / SELL)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>price</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">实际成交价格</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>amount</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">成交的资产数量 (Base Asset)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>fee</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">交易手续费数量</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>timestamp</code></td>
+<td style="text-align:left">DateTime</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">交易所记录的订单发生时间</td>
+</tr>
+</tbody>
+</table>
+<h4 id="leg-聚合持仓头寸表"><code>Leg</code> (聚合持仓/头寸表)</h4>
+<p>由底层 Trade 经算法归集而来的完整交易生命周期，<strong>是用户复盘的核心单元</strong>。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>userId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">FK</td>
+<td style="text-align:left">冗余用户ID，便于顶层权限隔离与查询</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>symbol</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">交易对名称</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>side</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">仓位方向 (LONG / SHORT)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>status</code></td>
+<td style="text-align:left">Enum</td>
+<td style="text-align:left">Default OPEN</td>
+<td style="text-align:left">状态 (OPEN/CLOSED/LIQUIDATED 等)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>openDate</code></td>
+<td style="text-align:left">DateTime</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">首次建仓时间</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>openPrice</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">首笔开仓成交价</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>averageEntry</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">动态加权平均开仓成本价</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>averageExit</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">Nullable</td>
+<td style="text-align:left">动态加权平均平仓出场价</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>realisedPnL</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">Default 0</td>
+<td style="text-align:left">已实现盈亏 (原始计价币种)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>netPnL</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">Default 0</td>
+<td style="text-align:left">最终净利润 (已扣除手续费)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>peakSizeUsd</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">Nullable</td>
+<td style="text-align:left">持仓期间达到的最大名义价值</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>mae</code> / <code>mfe</code></td>
+<td style="text-align:left">Float</td>
+<td style="text-align:left">Nullable</td>
+<td style="text-align:left">最大不利波动 / 最大有利波动</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>strategy</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Nullable</td>
+<td style="text-align:left">记录：使用的交易策略名称</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>mistakes</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Nullable, Text</td>
+<td style="text-align:left">记录：犯错反思与总结</td>
+</tr>
+</tbody>
+</table>
+<h3 id="34-辅助分类模块">3.4. 辅助分类模块</h3>
+<h4 id="tag-标签表"><code>Tag</code> (标签表)</h4>
+<p>用于给交易 (Leg) 打上策略、情绪、形态等维度的自定义标签。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>userId</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">FK, Nullable</td>
+<td style="text-align:left">所属用户（为空代表系统全局预设）</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>name</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">标签显示名称</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>slug</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Unique</td>
+<td style="text-align:left">URL 友好的唯一标识符</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>color</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Default &quot;#6366f1&quot;</td>
+<td style="text-align:left">标签 UI 颜色代码 (Hex)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>usageCount</code></td>
+<td style="text-align:left">Int</td>
+<td style="text-align:left">Default 0</td>
+<td style="text-align:left">冗余：被关联次数，用于前端热度排序</td>
+</tr>
+</tbody>
+</table>
+<h3 id="35-系统级模块">3.5. 系统级模块</h3>
+<h4 id="systemconfig-系统全局配置表"><code>SystemConfig</code> (系统全局配置表)</h4>
+<p>存储站点的动态开关和环境变量配置。</p>
+<table>
+<thead>
+<tr>
+<th style="text-align:left">字段名</th>
+<th style="text-align:left">数据类型</th>
+<th style="text-align:left">约束/默认值</th>
+<th style="text-align:left">描述说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align:left"><code>key</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Unique</td>
+<td style="text-align:left">配置键名 (如 &quot;MAINTENANCE_MODE&quot;)</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>value</code></td>
+<td style="text-align:left">Json</td>
+<td style="text-align:left">-</td>
+<td style="text-align:left">配置项的具体动态键值</td>
+</tr>
+<tr>
+<td style="text-align:left"><code>description</code></td>
+<td style="text-align:left">String</td>
+<td style="text-align:left">Nullable, Text</td>
+<td style="text-align:left">作用及修改说明</td>
+</tr>
+</tbody>
+</table>
+<hr>
+<h2 id="4-关键架构设计说明">4. 关键架构设计说明</h2>
+<ol>
+<li><strong>不可变底稿原则</strong>：<code>Trade</code> 表的数据一旦从交易所拉取并去重入库，即视为财务流水底稿，系统业务层不应对其进行修改。所有复杂的盈亏计算均在 <code>Leg</code> 表中体现。</li>
+<li><strong>读写分离与冗余</strong>：<code>Leg</code> 表中冗余了 <code>userId</code> 字段，这是为了避免在查询用户历史复盘数据时，需要执行 <code>User -&gt; ApiKey -&gt; Trade -&gt; Leg</code> 这样低效的跨表多级联查。</li>
+<li><strong>高阶指标预留</strong>：<code>Leg</code> 表中提前预留了 <code>mae</code>、<code>mfe</code>、<code>entryQuality</code> 等字段，需在后续引入 K 线数据源后，通过异步任务计算填入，计算结果将直接反映交易的真实抗风险与盈利能力。</li>
+</ol>
+
+            
+            
+        </body>
+        </html>

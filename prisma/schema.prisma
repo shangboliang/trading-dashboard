@@ -1,0 +1,469 @@
+// 交易复盘系统 Prisma Schema
+// 包含：用户系统、交易所账户、原始成交、聚合持仓、标签系统
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================
+// 1. 用户与认证系统
+// ============================================
+
+/// 用户表：存储系统所有用户的核心认证与基础信息
+model User {
+  /// 内部递增自增主键
+  id            Int        @id @default(autoincrement())
+  /// 外部暴露的唯一标识，防止被猜出系统真实用户规模
+  uuid          String     @unique @default(cuid())
+  /// 登录邮箱
+  email         String     @unique
+  /// 密码哈希（如果是第三方 OAuth 登录则为空）
+  passwordHash  String?
+  /// 用户昵称/显示名
+  name          String?
+  /// 用户头像的 URL 链接
+  avatarUrl     String?
+  /// 用户首选时区，这对于复盘时的 K 线对齐非常重要
+  timezone      String     @default("UTC")
+  /// 账户状态：活跃/封禁/删除
+  status        UserStatus @default(ACTIVE)
+  /// 权限角色：普通用户/管理员/付费会员
+  role          Role       @default(USER)
+  
+  apiKeys       ApiKey[]
+  legs          Leg[]
+  tags          Tag[]
+  settings      UserSettings?
+  
+  /// 账号注册时间
+  createdAt     DateTime   @default(now())
+  /// 资料最后更新时间
+  updatedAt     DateTime   @updatedAt
+  /// 最后一次成功登录的时间
+  lastLoginAt   DateTime?
+  
+  @@index([email])
+  @@index([status])
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum Role {
+  USER
+  ADMIN
+  PREMIUM
+}
+
+/// 用户偏好配置表：存储用户的 UI 设置和全局偏好
+model UserSettings {
+  /// 内部主键
+  id               Int      @id @default(autoincrement())
+  /// 关联的用户 ID
+  userId           Int      @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  /// 仪表盘默认展示时间范围（如："30d" 表示最近30天）
+  defaultTimeframe String   @default("30d")
+  /// 全局计价/显示货币（如折算为 USD 或 USDT 展示）
+  currency         String   @default("USDT")
+  /// UI 主题（"dark" / "light"）
+  theme            String   @default("dark")
+  
+  /// 是否允许发送邮件通知
+  enableEmailNotify Boolean @default(false)
+  
+  /// 设置最后修改时间
+  updatedAt        DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+// ============================================
+// 2. 交易所 API 账户管理
+// ============================================
+
+/// 交易所 API 凭证表：管理用户绑定的各大交易所 API 密钥
+model ApiKey {
+  /// 内部主键
+  id           Int        @id @default(autoincrement())
+  /// 外部唯一标识
+  uuid         String     @unique @default(cuid())
+  /// 归属的用户 ID
+  userId       Int
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  /// 用户给该 API 的备注名（如：币安主账户-U本位合约）
+  name         String
+  /// 交易所标识枚举（BINANCE, OKX 等）
+  exchange     Exchange
+  
+  /// API 公钥（业务层需对称加密后存入）
+  apiKey       String
+  /// API 密钥（业务层需对称加密后存入）
+  apiSecret    String
+  /// API 密码/Passphrase（部分交易所如 OKX 强校验此项）
+  passphrase   String?
+  
+  /// 记录该 API 的实际权限范围（如: 读取、交易等）
+  permissions  Json?
+  /// 绑定的服务器 IP 白名单列表
+  ipWhitelist  String[]
+  
+  /// 凭证是否已通过首次连通性验证
+  isVerified   Boolean    @default(false)
+  /// 首次/最后验证成功的时间
+  verifiedAt   DateTime?
+  /// 最后一次成功拉取历史记录的时间
+  lastSyncAt   DateTime?
+  /// 当前同步引擎的状态（等待中/同步中/完成/失败）
+  syncStatus   SyncStatus @default(PENDING)
+  /// 若同步失败，存储具体的报错信息以便向用户展示
+  errorMessage String?    @db.Text
+  
+  trades       Trade[]
+  syncLogs     SyncLog[]
+  
+  /// 绑定时间
+  createdAt    DateTime  @default(now())
+  /// 更新时间
+  updatedAt    DateTime  @updatedAt
+  
+  @@index([userId])
+  @@index([exchange])
+  @@index([isVerified])
+}
+
+enum Exchange {
+  BINANCE
+  OKX
+  BYBIT
+  HUOBI
+  GATEIO
+  KUCOIN
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCING
+  COMPLETED
+  FAILED
+}
+
+// ============================================
+// 3. 原始成交记录 (从交易所同步)
+// ============================================
+
+/// 原始成交表：直接从交易所接口拉取回来的不可变底稿数据
+model Trade {
+  /// 交易所返回的真实 Trade ID (作为主键去重)
+  id           String     @id
+  /// 内部系统生成的唯一标识
+  uuid         String     @unique @default(cuid())
+  
+  /// 数据来源的 API Key
+  apiKeyId     Int
+  apiKey       ApiKey     @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  
+  /// 被归集引擎处理后，挂载到的聚合头寸(Leg) ID
+  legId        Int?
+  leg          Leg?       @relation(fields: [legId], references: [id], onDelete: SetNull)
+  
+  /// 交易对字符串 (例如 "BTC/USDT:USDT" 或 "BTCUSDT")
+  symbol       String
+  /// 基础资产 (例如 "BTC")
+  baseAsset    String     @default("")
+  /// 计价资产 (例如 "USDT")
+  quoteAsset   String     @default("")
+  
+  /// 交易方向：买入(BUY) / 卖出(SELL)
+  side         TradeSide
+  /// 订单类型：市价、限价等
+  type         OrderType?
+  
+  /// 实际成交价格
+  price        Float
+  /// 成交的资产数量 (Base Asset 数量)
+  amount       Float
+  /// 成交的总名义价值 (Price * Amount)
+  quoteAmount  Float
+  
+  /// 交易手续费数量
+  fee          Float
+  /// 扣除手续费的币种 (例如 "BNB", "USDT")
+  feeAsset     String
+  /// 以美元估算的手续费法币价值（便于后续统一计算净利润）
+  feeUsd       Float      @default(0)
+  
+  /// 交易所记录的订单实际发生时间
+  timestamp    DateTime
+  /// 系统记录该条数据被入库的时间
+  tradedAt     DateTime   @default(now())
+  
+  /// 完整保存交易所返回的原始 JSON，便于追溯 BUG
+  rawJson      Json?
+  
+  /// 记录创建时间
+  createdAt    DateTime   @default(now())
+  
+  @@index([apiKeyId])
+  @@index([legId])
+  @@index([symbol])
+  @@index([timestamp])
+  @@index([side])
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP_LOSS
+  STOP_LOSS_LIMIT
+  TAKE_PROFIT
+  TAKE_PROFIT_LIMIT
+}
+
+// ============================================
+// 4. 聚合持仓/头寸 (Leg / Position) - 核心复盘单元
+// ============================================
+
+/// 聚合持仓表(Leg)：由底层 Trade 归集而来的完整交易生命周期（核心复盘单元）
+model Leg {
+  /// 内部主键
+  id              Int       @id @default(autoincrement())
+  /// 外部唯一标识
+  uuid            String    @unique @default(cuid())
+  
+  /// 冗余 userId 便于快速做权限隔离和总表查询
+  userId          Int
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  /// 交易对名称
+  symbol          String
+  /// 基础资产
+  baseAsset       String    @default("")
+  /// 计价资产
+  quoteAsset      String    @default("")
+  /// 仓位方向：做多(LONG) / 做空(SHORT)
+  side            LegSide
+  
+  /// 首次建仓的时间 (第一笔开仓 Trade 的时间)
+  openDate        DateTime
+  /// 首笔开仓的成交价格
+  openPrice       Float
+  
+  /// 完全平仓的时间
+  closeDate       DateTime?
+  /// 完全平仓时的出场价格
+  closePrice      Float?
+  
+  /// 头寸当前状态（持仓中/已平仓/部分平仓等）
+  status          LegStatus @default(OPEN)
+  
+  /// 累计最大开仓数量（历史峰值仓位大小）
+  openAmount      Float
+  /// 累计已经平仓的数量
+  closeAmount     Float?
+  /// 当前尚未平仓的剩余数量
+  currentAmount   Float
+  
+  /// 动态计算的加权平均开仓成本价
+  averageEntry    Float
+  /// 动态计算的加权平均平仓出场价
+  averageExit     Float?
+  
+  /// 已实现盈亏（按计价币种算，如 U本位算USDT）
+  realisedPnL     Float     @default(0)
+  /// 转换为统一定价(如 USD)的已实现盈亏
+  realisedPnLusd  Float     @default(0)
+  /// 浮动盈亏 (当前未平仓部分按最新市价算出的账面盈亏)
+  unrealisedPnL   Float?
+  
+  /// 累计消耗的交易手续费（原币种）
+  commission      Float     @default(0)
+  /// 转换为统一定价(如 USD)的手续费
+  commissionUsd   Float     @default(0)
+  
+  /// 最终净利润 = realisedPnLusd - commissionUsd
+  netPnL          Float     @default(0)
+  
+  /// 仓位初始的名义价值 (转换为 USD)
+  sizeUsd         Float
+  /// 持仓期间仓位达到的最大名义价值 (反映极限资金占用情况)
+  peakSizeUsd     Float?
+  
+  /// 交易持续时间 (单位: 秒, 即 closeDate - openDate)
+  duration        Int?
+  
+  /// M.A.E 最大不利波动 - 反映这笔交易曾经承受过最大的亏损/浮亏
+  mae             Float?
+  /// M.F.E 最大有利波动 - 反映这笔交易曾经有过多少最大浮盈(但没走)
+  mfe             Float?
+  /// 进场质量得分 (0-100%, 评价买点好坏)
+  entryQuality    Float?
+  /// 出场质量得分 (0-100%, 评价卖点好坏)
+  exitQuality     Float?
+  
+  tags            Tag[]     @relation("LegTags")
+  trades          Trade[]
+  
+  /// 用户的自由格式交易笔记/心得
+  notes           String?   @db.Text
+  /// 使用的交易策略名称（如：突破、均值回归、SMC等）
+  strategy        String?
+  /// 交易形态/Setup（如：头肩底、2B法则等）
+  setup           String?
+  /// 犯错记录（如：FOMO、扛单、没设止损等）
+  mistakes        String?   @db.Text
+  
+  /// 交易快照数据（用于还原开仓时的前端图表截图、指标参数等）
+  snapshotData    Json?
+  
+  /// Leg 记录生成时间
+  createdAt       DateTime  @default(now())
+  /// 状态最后更新时间
+  updatedAt       DateTime  @updatedAt
+  
+  @@index([userId])
+  @@index([symbol])
+  @@index([status])
+  @@index([openDate])
+  @@index([closeDate])
+  @@index([side])
+  @@index([netPnL])
+}
+
+enum LegSide {
+  LONG
+  SHORT
+}
+
+enum LegStatus {
+  OPEN
+  CLOSED
+  PARTIALLY_CLOSED
+  LIQUIDATED
+  CANCELLED
+}
+
+// ============================================
+// 5. 标签系统 (策略分类)
+// ============================================
+
+/// 标签表：用于给交易(Leg)打上各种策略、情绪、形态等维度的标签
+model Tag {
+  /// 内部主键
+  id          Int      @id @default(autoincrement())
+  /// 外部唯一标识
+  uuid        String   @unique @default(cuid())
+  
+  /// 所属用户ID（如果为空，代表是系统内置的全局预设标签）
+  userId      Int?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  /// 标签显示名称（如："顺势交易", "被套"）
+  name        String
+  /// URL 友好的唯一标识符（如："trend-following"）
+  slug        String   @unique
+  /// 标签在前端展示的背景/文字颜色代码 (Hex 格式)
+  color       String   @default("#6366f1")
+  /// 标签图标的标识类名或 SVG/Emoji
+  icon        String?
+  
+  /// 标签的具体含义描述
+  description String?  @db.Text
+  
+  legs        Leg[]    @relation("LegTags")
+  
+  /// 冗余字段：该标签被关联的次数（方便前端做"热门标签"排序展示）
+  usageCount  Int      @default(0)
+  
+  /// 创建时间
+  createdAt   DateTime @default(now())
+  /// 更新时间
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([slug])
+  @@index([name])
+}
+
+// ============================================
+// 6. 数据同步日志
+// ============================================
+
+/// 同步日志表：记录每次后台通过 API 抓取数据的成功与失败明细（审计排错用）
+model SyncLog {
+  /// 内部主键
+  id             Int        @id @default(autoincrement())
+  /// 外部唯一标识
+  uuid           String     @unique @default(cuid())
+  
+  /// 关联的 API Key ID
+  apiKeyId       Int
+  apiKey         ApiKey     @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  
+  /// 本次任务的最终运行状态
+  status         SyncStatus
+  /// 同步任务启动时间
+  startTime      DateTime   @default(now())
+  /// 同步任务结束/中止时间
+  endTime        DateTime?
+  
+  /// 从交易所接口总共拉取到的原始交易条数
+  tradesFound    Int        @default(0)
+  /// 经过数据库去重后，实际写入成功的新交易条数
+  tradesImported Int        @default(0)
+  /// 归集引擎本次运算新创建的头寸 (Leg) 数量
+  legsCreated    Int        @default(0)
+  /// 归集引擎本次更新(追加/平仓)的已有头寸数量
+  legsUpdated    Int        @default(0)
+  
+  /// 抓取失败时的简要错误信息
+  errorMessage   String?    @db.Text
+  /// 详细的报错堆栈代码（供开发者后台排查）
+  errorStack     String?    @db.Text
+  
+  /// 存储其他附加信息（如：本次拉取的 since 时间戳、请求耗时等）
+  metadata       Json?
+  
+  /// 日志生成时间
+  createdAt      DateTime   @default(now())
+  
+  @@index([apiKeyId])
+  @@index([status])
+  @@index([startTime])
+}
+
+// ============================================
+// 7. 系统配置与元数据
+// ============================================
+
+/// 系统全局配置表：存储站点的环境变量或动态开关
+model SystemConfig {
+  /// 内部主键
+  id          Int      @id @default(autoincrement())
+  /// 配置键名（如："MAINTENANCE_MODE"）
+  key         String   @unique
+  /// 配置的动态键值（使用 JSON 支持存布尔、数组、复杂对象）
+  value       Json
+  /// 该项系统配置的作用及修改说明
+  description String?  @db.Text
+  
+  /// 最后修改时间
+  updatedAt   DateTime @updatedAt
+  
+  @@index([key])
+}

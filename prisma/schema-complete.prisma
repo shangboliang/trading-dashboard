@@ -1,0 +1,415 @@
+// 完整交易复盘系统 Prisma Schema
+// 包含：用户系统、交易所账户、原始成交、聚合持仓、分析指标、系统配置
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================
+// 1. 用户与认证系统
+// ============================================
+
+model User {
+  id            Int       @id @default(autoincrement())
+  uuid          Uuid      @unique @default(uuid())
+  email         String    @unique
+  passwordHash  String?
+  name          String?
+  avatarUrl     String?
+  timezone      String    @default("UTC")
+  status        UserStatus @default(ACTIVE)
+  role          Role      @default(USER)
+  
+  apiKeys       ApiKey[]
+  legs          Leg[]
+  tags          Tag[]
+  settings      UserSettings?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+  
+  @@index([email])
+  @@index([status])
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum Role {
+  USER
+  ADMIN
+  PREMIUM
+}
+
+// 用户配置表
+model UserSettings {
+  id              Int     @id @default(autoincrement())
+  userId          Int     @unique
+  user            User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // 显示偏好
+  defaultTimeframe String  @default("30d") // 7d, 30d, 90d, all
+  currency         String  @default("USDT")
+  theme            String  @default("dark")
+  
+  // 通知设置
+  enableEmailNotify Boolean @default(false)
+  
+  updatedAt       DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+// ============================================
+// 2. 交易所 API 账户管理
+// ============================================
+
+model ApiKey {
+  id           Int       @id @default(autoincrement())
+  uuid         Uuid      @unique @default(uuid())
+  userId       Int
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name         String    // 自定义别名，如 "Binance 主账户"
+  exchange     Exchange  // 'binance', 'okx', 'bybit', 'huobi'
+  
+  // 加密存储的 API 凭证
+  apiKey       String    @db.VarChar(500)
+  apiSecret    String    @db.VarChar(500)
+  passphrase   String?   @db.VarChar(500) // OKX/Bybit 需要
+  
+  // 权限与安全
+  permissions  Json?     // API Key 权限快照
+  ipWhitelist  String[]  // IP 白名单
+  
+  // 状态
+  isVerified   Boolean   @default(false)
+  verifiedAt   DateTime?
+  lastSyncAt   DateTime?
+  syncStatus   SyncStatus @default(PENDING)
+  errorMessage String?   @db.Text
+  
+  trades       Trade[]
+  
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  
+  @@index([userId])
+  @@index([exchange])
+  @@index([isVerified])
+}
+
+enum Exchange {
+  BINANCE
+  OKX
+  BYBIT
+  HUOBI
+  GATEIO
+  KUCOIN
+}
+
+enum SyncStatus {
+  PENDING
+  SYNCING
+  COMPLETED
+  FAILED
+}
+
+// ============================================
+// 3. 原始成交记录 (从交易所同步)
+// ============================================
+
+model Trade {
+  id           String   @id // 交易所原始 ID
+  uuid         Uuid     @unique @default(uuid())
+  
+  apiKeyId     Int
+  apiKey       ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  
+  // 关联到聚合的 Leg (可选，可能先有 Trade 后有 Leg)
+  legId        Int?
+  leg          Leg?     @relation(fields: [legId], references: [id], onDelete: SetNull)
+  
+  // 交易基本信息
+  symbol       String   // 如 "BTCUSDT"
+  baseAsset    String   // "BTC"
+  quoteAsset   String   // "USDT"
+  
+  side         TradeSide // 'buy' | 'sell'
+  type         OrderType? // 'market', 'limit', etc.
+  
+  // 价格与数量
+  price        Float    @db.Decimal(20, 8)
+  amount       Float    @db.Decimal(20, 8)
+  quoteAmount  Float    @db.Decimal(20, 8) // 成交额 = price * amount
+  
+  // 手续费
+  fee          Float    @db.Decimal(20, 8)
+  feeAsset     String   // 如 "BNB", "USDT"
+  feeUsd       Float    @db.Decimal(20, 8) // 换算成美元的手续费
+  
+  // 时间戳
+  timestamp    DateTime
+  tradedAt     DateTime @default(now())
+  
+  // 扩展信息 (交易所原始数据备份)
+  rawJson      Json?    @db.JsonB
+  
+  createdAt    DateTime @default(now())
+  
+  @@index([apiKeyId])
+  @@index([legId])
+  @@index([symbol])
+  @@index([timestamp])
+  @@index([side])
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+enum OrderType {
+  MARKET
+  LIMIT
+  STOP_LOSS
+  STOP_LOSS_LIMIT
+  TAKE_PROFIT
+  TAKE_PROFIT_LIMIT
+}
+
+// ============================================
+// 4. 聚合持仓/头寸 (Leg / Position) - 核心复盘单元
+// ============================================
+
+model Leg {
+  id              Int      @id @default(autoincrement())
+  uuid            Uuid     @unique @default(uuid())
+  
+  userId          Int
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // 基本信息
+  symbol          String
+  baseAsset       String   // "BTC"
+  quoteAsset      String   // "USDT"
+  side            LegSide  // 'long' | 'short'
+  
+  // 开仓信息
+  openDate        DateTime
+  openPrice       Float    @db.Decimal(20, 8) // 平均开仓价
+  
+  // 平仓信息
+  closeDate       DateTime?
+  closePrice      Float?   @db.Decimal(20, 8) // 平均平仓价
+  
+  // 状态
+  status          LegStatus @default(OPEN)
+  
+  // 数量相关
+  openAmount      Float    @db.Decimal(20, 8) // 开仓数量
+  closeAmount     Float?   @db.Decimal(20, 8) // 已平仓数量
+  currentAmount   Float    @db.Decimal(20, 8) // 当前持仓量 (正数)
+  
+  // 核心盈亏指标 (美元计价)
+  averageEntry    Float    @db.Decimal(20, 8) // 同 openPrice
+  averageExit     Float?   @db.Decimal(20, 8) // 同 closePrice
+  
+  realisedPnL     Float    @db.Decimal(20, 8) @default(0) // 已实现盈亏 (不含手续费)
+  realisedPnLusd  Float    @db.Decimal(20, 8) @default(0) // 同上，统一美元单位
+  
+  unrealisedPnL   Float?   @db.Decimal(20, 8) // 未实现盈亏 (持仓中)
+  
+  commission      Float    @db.Decimal(20, 8) @default(0) // 总手续费
+  commissionUsd   Float    @db.Decimal(20, 8) @default(0) // 手续费美元价值
+  
+  netPnL          Float    @db.Decimal(20, 8) @default(0) // 净盈亏 = realisedPnL - commission
+  
+  // 规模指标
+  sizeUsd         Float    @db.Decimal(20, 8) // 最大名义价值 (峰值仓位)
+  peakSizeUsd     Float    @db.Decimal(20, 8)? // 历史最大仓位
+  
+  // 时间指标
+  duration        Int?     // 持仓时长 (秒)
+  
+  // 进阶复盘指标
+  mae             Float?   @db.Decimal(10, 4) // 最大逆向跌幅 % (Maximum Adverse Excursion)
+  mfe             Float?   @db.Decimal(10, 4) // 最大顺向涨幅 % (Maximum Favorable Excursion)
+  
+  entryQuality    Float?   @db.Decimal(5, 2)  // 入场质量分 (0-100)
+  exitQuality     Float?   @db.Decimal(5, 2)  // 出场质量分 (0-100)
+  
+  // 标签 (多对多)
+  tags            Tag[]    @relation("LegTags")
+  
+  // 关联的原始成交记录
+  trades          Trade[]
+  
+  // 用户笔记
+  notes           String?  @db.Text
+  strategy        String?  // 策略名称
+  setup           String?  // 入场形态
+  mistakes        String?  @db.Text // 反思错误
+  
+  // 快照数据 (用于回测对比)
+  snapshotData    Json?    @db.JsonB
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([symbol])
+  @@index([status])
+  @@index([openDate])
+  @@index([closeDate])
+  @@index([side])
+  @@index([netPnL])
+}
+
+enum LegSide {
+  LONG
+  SHORT
+}
+
+enum LegStatus {
+  OPEN
+  CLOSED
+  PARTIALLY_CLOSED
+  LIQUIDATED
+  CANCELLED
+}
+
+// ============================================
+// 5. 标签系统 (策略分类)
+// ============================================
+
+model Tag {
+  id          Int      @id @default(autoincrement())
+  uuid        Uuid     @unique @default(uuid())
+  
+  userId      Int?     // null 表示系统标签
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name        String   // 标签名
+  slug        String   @unique // URL 友好的标识
+  color       String?  @default("#6366f1") // 标签颜色
+  icon        String?  // 图标
+  
+  description String?  @db.Text
+  
+  legs        Leg[]    @relation("LegTags")
+  
+  usageCount  Int      @default(0) // 使用次数
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([slug])
+  @@index([name])
+}
+
+// ============================================
+// 6. 市场数据 (K 线缓存)
+// ============================================
+
+model Candle {
+  id          Int      @id @default(autoincrement())
+  uuid        Uuid     @unique @default(uuid())
+  
+  symbol      String
+  exchange    Exchange
+  
+  timeframe   Timeframe // 1m, 5m, 1h, 4h, 1d, etc.
+  
+  timestamp   DateTime
+  open        Float    @db.Decimal(20, 8)
+  high        Float    @db.Decimal(20, 8)
+  low         Float    @db.Decimal(20, 8)
+  close       Float    @db.Decimal(20, 8)
+  volume      Float    @db.Decimal(20, 8)
+  
+  createdAt   DateTime @default(now())
+  
+  @@unique([symbol, exchange, timeframe, timestamp])
+  @@index([symbol, timeframe, timestamp])
+}
+
+enum Timeframe {
+  M1
+  M3
+  M5
+  M15
+  M30
+  H1
+  H2
+  H4
+  H6
+  H12
+  D1
+  W1
+  MN
+}
+
+// ============================================
+// 7. 数据同步日志
+// ============================================
+
+model SyncLog {
+  id          Int      @id @default(autoincrement())
+  uuid        Uuid     @unique @default(uuid())
+  
+  apiKeyId    Int
+  // apiKey    ApiKey?  @relation(fields: [apiKeyId], references: [id]) // 如果 ApiKey 被删除，日志保留
+  
+  status      SyncStatus
+  startTime   DateTime @default(now())
+  endTime     DateTime?
+  
+  // 统计信息
+  tradesFound    Int    @default(0)
+  tradesImported Int    @default(0)
+  legsCreated    Int    @default(0)
+  legsUpdated    Int    @default(0)
+  
+  errorMessage  String? @db.Text
+  errorStack    String? @db.Text
+  
+  metadata      Json?   // 额外信息
+  
+  createdAt     DateTime @default(now())
+  
+  @@index([apiKeyId])
+  @@index([status])
+  @@index([startTime])
+}
+
+// ============================================
+// 8. 系统配置与元数据
+// ============================================
+
+model SystemConfig {
+  id          Int      @id @default(autoincrement())
+  key         String   @unique
+  value       Json     @db.JsonB
+  description String?  @db.Text
+  
+  updatedAt   DateTime @updatedAt
+  
+  @@index([key])
+}
+
+// ============================================
+// 自定义类型
+// ============================================
+
+type Uuid = String @db.Uuid @default(dbgenerated("gen_random_uuid()"))
