@@ -5,6 +5,8 @@
 
 import prisma from '@/lib/prisma';
 import { ApiKeyService } from './ApiKeyService';
+import { FundingFeeService } from './FundingFeeService';
+import { MaeMfeService } from './MaeMfeService';
 import { aggregateTradesToLegs, RawTrade } from '@/lib/trade-aggregator';
 import type { Exchange } from '@prisma/client';
 
@@ -30,6 +32,20 @@ export class SyncService {
    * 同步指定 API Key 的历史成交数据
    */
   static async syncApiKey(apiKeyId: number): Promise<SyncResult> {
+
+    // 1. 并发拦截验证
+    const apiKeyDb = await prisma.apiKey.findUnique({
+      where: { id: apiKeyId },
+      select: { syncStatus: true, userId: true }
+    });
+
+    if (!apiKeyDb) throw new Error('API Key 不存在');
+    if (apiKeyDb.syncStatus === 'SYNCING') {
+      console.warn(`API Key ${apiKeyId} 正在同步中，拦截重复请求`);
+      throw new Error('数据正在同步中，请勿重复触发'); // 给前端抛出友好提示
+    }
+
+    // 2. 状态放行并锁定
     // 更新状态为同步中
     await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING');
 
@@ -164,16 +180,52 @@ export class SyncService {
         const symbolParts = trade.symbol.split('/');
         const baseAsset = symbolParts[0] || '';
         const quoteAsset = symbolParts[1] || 'USDT';
+        // Binance 双向持仓模式下 info.positionSide 为 'LONG' / 'SHORT' / 'BOTH'
+        const positionSide: string = trade.info?.positionSide ?? 'BOTH';
+
+        // 手续费处理：区分 BNB 抵扣和普通 USDT 手续费
+        // CCXT 统一格式：trade.fee = { cost: number, currency: string }
+        const feeCost: number     = trade.fee?.cost     ?? 0;
+        const feeCurrency: string = trade.fee?.currency ?? quoteAsset.split(':')[0];
+
+        // feeUsd：BNB 抵扣时需换算为 USD 等值
+        // Binance 在 trade.info.realizedPnl 旁边没有直接给 bnbPrice，
+        // 但 CCXT 解析后的 trade.fee.cost 已是 BNB 数量。
+        // 用 info.commission 和 info.commissionAsset 是原始字段，更可靠。
+        const rawFee: number         = parseFloat(trade.info?.commission ?? feeCost) || 0;
+        const rawFeeAsset: string    = trade.info?.commissionAsset ?? feeCurrency;
+
+        // 如果手续费币种就是 USDT/BUSD/USD，直接使用；
+        // 否则（BNB 等）尝试用 trade.info.quoteQty 折算：
+        //   BNB 实际扣费 ≈ rawFee × BNB/USDT 价格
+        //   Binance 不在单笔 trade 里返回 BNB 价格，但 CCXT Pro 或私有接口也没有。
+        //   现阶段最精确的近似：用当笔交易的名义价值 × 手续费率 0.075%（BNB 折扣后）
+        //   注意：这是估算，真实 BNB 价格可能有偏差，后续可通过拉取历史价格改进。
+        const STABLE_ASSETS = new Set(['USDT', 'BUSD', 'USDC', 'USD', 'DAI']);
+        let feeUsd: number;
+        if (STABLE_ASSETS.has(rawFeeAsset)) {
+          feeUsd = rawFee;
+        } else {
+          // 用 Binance 返回的 quoteQty（名义价值，USDT）× BNB 手续费率来估算
+          // info.quoteQty 是 USDT 成交额，info.commission 是 BNB 数量
+          // BNB_fee_USDT ≈ commission_BNB × (quoteQty / qty) 是不对的
+          // 正确近似：BNB_fee_USDT ≈ quoteQty * 0.00075（0.075% 含 BNB 折扣）
+          const notionalUsdt = parseFloat(trade.info?.quoteQty ?? 0) || (trade.price * trade.amount);
+          feeUsd = notionalUsdt * 0.00075;
+        }
 
         return {
           id: trade.id?.toString() || `${trade.timestamp}-${trade.symbol}`,
-          symbol: `${baseAsset}${quoteAsset}`, // "BTCUSDT"
+          symbol: `${baseAsset}${quoteAsset.split(':')[0]}`, // "BTCUSDT"
           baseAsset,
-          quoteAsset,
+          quoteAsset: quoteAsset.split(':')[0],
           side: trade.side,
+          positionSide,
           price: trade.price,
           amount: trade.amount,
-          fee: trade.fee?.cost || 0,
+          fee: rawFee,
+          feeAsset: rawFeeAsset,
+          feeUsd,
           timestamp: new Date(trade.timestamp),
         };
       });
@@ -188,12 +240,37 @@ export class SyncService {
       // 批量保存到数据库
       const importedCount = await this.saveTradesBatch(uniqueTrades, apiKeyId);
 
-      // 聚合 Trades 到 Legs
-      const legs = aggregateTradesToLegs(uniqueTrades);
+      // ── 全量重聚合 ─────────────────────────────────────────────────────
+      // 必须用数据库全量交易而非仅本次 uniqueTrades。
+      // 原因：开仓和平仓交易可能分属不同同步批次，若只传新交易，聚合器无法
+      // 找到配对的开/平仓，导致已平仓 Leg 的 PnL = 0 或状态错误。
+      const allDbTrades = await prisma.trade.findMany({
+        where: { apiKeyId },
+        orderBy: { timestamp: 'asc' },
+      });
+
+      const tradesForAggregation: RawTrade[] = allDbTrades.map(t => ({
+        id:           t.id,
+        symbol:       t.symbol,
+        baseAsset:    t.baseAsset,
+        quoteAsset:   t.quoteAsset,
+        side:         t.side.toLowerCase(),
+        positionSide: t.positionSide,
+        price:        t.price,
+        amount:       t.amount,
+        fee:          t.fee,
+        feeAsset:     t.feeAsset,
+        feeUsd:       t.feeUsd,
+        timestamp:    t.timestamp,
+      }));
+
+      console.log(`从数据库读取 ${tradesForAggregation.length} 条交易用于全量聚合`);
+
+      const legs = aggregateTradesToLegs(tradesForAggregation);
       console.log(`聚合生成 ${legs.length} 个持仓`);
 
-      // 批量保存 Legs
-      const { created, updated } = await this.saveLegsBatch(legs, userId);
+      // 批量保存 Legs，取回新建 Leg 的 ID 用于后续异步计算
+      const { created, updated, newLegIds } = await this.saveLegsBatch(legs, userId);
 
       // 更新同步状态
       await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED');
@@ -206,6 +283,20 @@ export class SyncService {
         legsCreated: created,
         legsUpdated: updated,
       });
+
+      // ── 异步后处理（fire-and-forget，不阻塞主流程响应） ──────────────
+      // 资金费同步：拉取并归集到 Leg，更新 netPnL
+      FundingFeeService.sync(exchange, apiKeyId, since).catch(err =>
+        console.error('[FundingFee] 后台同步失败:', err instanceof Error ? err.message : err)
+      );
+
+      // MAE/MFE 计算：对本次新建的已平仓 Leg 拉取 K 线并写入
+      if (newLegIds.length > 0) {
+        MaeMfeService.calculate(exchange, newLegIds).catch(err =>
+          console.error('[MAE/MFE] 后台计算失败:', err instanceof Error ? err.message : err)
+        );
+      }
+      // ────────────────────────────────────────────────────────────────
 
       return {
         tradesFound: uniqueTrades.length,
@@ -254,12 +345,13 @@ export class SyncService {
           baseAsset: trade.baseAsset || '',
           quoteAsset: trade.quoteAsset || 'USDT',
           side: trade.side.toUpperCase() as any,
+          positionSide: trade.positionSide ?? 'BOTH',
           price: trade.price,
           amount: trade.amount,
           quoteAmount: trade.price * trade.amount,
           fee: trade.fee,
-          feeAsset: trade.quoteAsset || 'USDT',
-          feeUsd: trade.fee,
+          feeAsset: trade.feeAsset,
+          feeUsd: trade.feeUsd,
           timestamp: trade.timestamp,
         })),
         skipDuplicates: true, // 跳过重复的 ID
@@ -274,29 +366,31 @@ export class SyncService {
   }
   
   /**
-   * 批量保存/更新 Legs
+   * 批量保存/更新 Legs，返回创建数、更新数、以及新建 Leg 的 ID 列表
    */
   private static async saveLegsBatch(
     legs: any[],
     userId: number
-  ): Promise<{ created: number; updated: number }> {
+  ): Promise<{ created: number; updated: number; newLegIds: number[] }> {
     if (legs.length === 0) {
       console.log('没有持仓需要保存');
-      return { created: 0, updated: 0 };
+      return { created: 0, updated: 0, newLegIds: [] };
     }
 
     let created = 0;
     let updated = 0;
+    const newLegIds: number[] = [];
 
     // 使用事务批量处理
     await prisma.$transaction(async (tx) => {
       for (const leg of legs) {
-        // 尝试查找已存在的 Leg
+        // 尝试查找已存在的 Leg（symbol + openDate + side 三者联合唯一，双向持仓不会冲突）
         const existingLeg = await tx.leg.findFirst({
           where: {
             userId,
-            symbol: leg.symbol,
+            symbol:   leg.symbol,
             openDate: leg.openDate,
+            side:     leg.side.toUpperCase() as any,
           },
         });
 
@@ -316,15 +410,13 @@ export class SyncService {
         };
 
         if (existingLeg) {
-          // 更新现有 Leg
           await tx.leg.update({
             where: { id: existingLeg.id },
             data: legData,
           });
           updated++;
         } else {
-          // 创建新 Leg
-          await tx.leg.create({
+          const created_ = await tx.leg.create({
             data: {
               userId,
               symbol: leg.symbol,
@@ -339,14 +431,16 @@ export class SyncService {
               peakSizeUsd: leg.maxSizeUsd || leg.sizeUsd || 0,
               ...legData,
             },
+            select: { id: true },
           });
+          newLegIds.push(created_.id);
           created++;
         }
       }
     });
 
     console.log(`创建 ${created} 个持仓，更新 ${updated} 个持仓`);
-    return { created, updated };
+    return { created, updated, newLegIds };
   }
   
   /**

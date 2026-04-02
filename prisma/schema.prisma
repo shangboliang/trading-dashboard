@@ -131,6 +131,7 @@ model ApiKey {
   
   trades       Trade[]
   syncLogs     SyncLog[]
+  fundingFees  FundingFee[]
   
   /// 绑定时间
   createdAt    DateTime  @default(now())
@@ -186,6 +187,8 @@ model Trade {
   
   /// 交易方向：买入(BUY) / 卖出(SELL)
   side         TradeSide
+  /// 双向持仓模式下的仓位方向：LONG / SHORT / BOTH(单向)
+  positionSide String     @default("BOTH")
   /// 订单类型：市价、限价等
   type         OrderType?
   
@@ -296,8 +299,11 @@ model Leg {
   /// 转换为统一定价(如 USD)的手续费
   commissionUsd   Float     @default(0)
   
-  /// 最终净利润 = realisedPnLusd - commissionUsd
+  /// 最终净利润 = realisedPnLusd - commissionUsd + fundingFeeUsd
   netPnL          Float     @default(0)
+
+  /// 持仓期间累计产生的资金费（负=支付，正=收入），USD 计价
+  fundingFeeUsd   Float     @default(0)
   
   /// 仓位初始的名义价值 (转换为 USD)
   sizeUsd         Float
@@ -318,6 +324,7 @@ model Leg {
   
   tags            Tag[]     @relation("LegTags")
   trades          Trade[]
+  fundingFees     FundingFee[]
   
   /// 用户的自由格式交易笔记/心得
   notes           String?   @db.Text
@@ -466,4 +473,39 @@ model SystemConfig {
   updatedAt   DateTime @updatedAt
   
   @@index([key])
+}
+
+// ============================================
+// 8. 资金费率流水
+// ============================================
+
+/// 合约持仓期间产生的每一笔资金费收支记录
+model FundingFee {
+  id          Int      @id @default(autoincrement())
+
+  /// 关联的 API Key
+  apiKeyId    Int
+  apiKey      ApiKey   @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  /// 归集到的 Leg（开仓时间 ≤ 资金费时间 ≤ 平仓时间）
+  legId       Int?
+  leg         Leg?     @relation(fields: [legId], references: [id], onDelete: SetNull)
+
+  /// 交易对（数据库格式，如 "BTCUSDT"）
+  symbol      String
+  /// 资金费金额（负数=支付，正数=收入；原始计价币种）
+  amount      Float
+  /// USD 等值金额
+  amountUsd   Float
+  /// 资金费发生时间（通常每 8 小时一次）
+  timestamp   DateTime
+
+  createdAt   DateTime @default(now())
+
+  /// 防重：同一 apiKey + symbol + 时间点唯一
+  @@unique([apiKeyId, symbol, timestamp])
+  @@index([apiKeyId])
+  @@index([legId])
+  @@index([symbol])
+  @@index([timestamp])
 }

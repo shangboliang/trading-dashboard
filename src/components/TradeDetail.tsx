@@ -45,12 +45,12 @@ export function TradeDetail({ trade, onClose }: TradeDetailProps) {
               </div>
 
               <Card className="p-0 overflow-hidden bg-panel/50">
-                 <KLineChart 
+                 <KLineChart
                     symbol={trade.symbol}
                     openDate={trade.openDate}
-                    closeDate={trade.closeDate}
+                    closeDate={trade.closeDate ?? null}
                     openPrice={trade.averageEntry}
-                    closePrice={trade.averageExit}
+                    closePrice={trade.averageExit ?? null}
                     side={trade.side}
                  />
               </Card>
@@ -95,7 +95,11 @@ export function TradeDetail({ trade, onClose }: TradeDetailProps) {
                      </div>
                      <div className="flex justify-between items-center">
                         <span className="text-sm text-textMuted">持仓时间</span>
-                        <span className="text-textMain">{Math.floor(trade.duration / 3600)}h {Math.floor((trade.duration % 3600) / 60)}m</span>
+                        <span className="text-textMain">
+                          {trade.duration != null
+                            ? `${Math.floor(trade.duration / 3600)}h ${Math.floor((trade.duration % 3600) / 60)}m`
+                            : '持仓中'}
+                        </span>
                      </div>
                   </div>
                </Card>
@@ -108,7 +112,9 @@ export function TradeDetail({ trade, onClose }: TradeDetailProps) {
                      </div>
                      <div>
                         <p className="text-[10px] text-textMuted uppercase mb-1">Exit</p>
-                        <p className="font-mono text-white text-lg">${trade.averageExit.toFixed(4)}</p>
+                        <p className="font-mono text-white text-lg">
+                          {trade.averageExit != null ? `$${trade.averageExit.toFixed(4)}` : '持仓中'}
+                        </p>
                      </div>
                   </div>
                </Card>
