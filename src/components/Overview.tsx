@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { analyticsApi, type SummaryStats } from "@/lib/api-client";
+import { analyticsApi, type SummaryStats, type GlobalFilter } from "@/lib/api-client";
 import { Card } from "./Card";
 import { ArrowUpRight, ArrowDownRight, Activity, TrendingUp, Clock, Target, PercentSquare, Loader2 } from "lucide-react";
 
@@ -17,14 +17,19 @@ function formatDuration(seconds: number) {
   return `${m}分钟`;
 }
 
-export function Overview() {
+interface OverviewProps {
+  filters?: GlobalFilter;
+}
+
+export function Overview({ filters }: OverviewProps) {
   const [stats, setStats] = useState<SummaryStats | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadStats() {
       try {
-        const data = await analyticsApi.getSummary();
+        setLoading(true);
+        const data = await analyticsApi.getSummary(filters);
         setStats(data);
       } catch (err) {
         console.error('Failed to load summary stats:', err);
@@ -33,7 +38,7 @@ export function Overview() {
       }
     }
     loadStats();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (

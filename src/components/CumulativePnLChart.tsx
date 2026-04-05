@@ -2,17 +2,22 @@
 
 import { useState, useEffect } from "react";
 import ReactECharts from "echarts-for-react";
-import { analyticsApi, type PnLPoint } from "@/lib/api-client";
+import { analyticsApi, type PnLPoint, type GlobalFilter } from "@/lib/api-client";
 import { Loader2 } from "lucide-react";
 
-export function CumulativePnLChart() {
+interface CumulativePnLChartProps {
+  filters?: GlobalFilter;
+}
+
+export function CumulativePnLChart({ filters }: CumulativePnLChartProps) {
   const [data, setData] = useState<PnLPoint[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadPnL() {
       try {
-        const result = await analyticsApi.getPnLCurve(30);
+        setLoading(true);
+        const result = await analyticsApi.getPnLCurve(filters);
         setData(result || []);
       } catch (err) {
         console.error('Failed to load PnL curve:', err);
@@ -21,7 +26,7 @@ export function CumulativePnLChart() {
       }
     }
     loadPnL();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (

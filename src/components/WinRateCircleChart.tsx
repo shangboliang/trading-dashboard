@@ -9,10 +9,12 @@ interface WinRateCircleChartProps {
 }
 
 export function WinRateCircleChart({ title, winRate, color }: WinRateCircleChartProps) {
+  const displayRate = isNaN(winRate) ? 0 : winRate;
+  
   const option = {
     backgroundColor: 'transparent',
     title: {
-      text: `${winRate}%`,
+      text: `${displayRate.toFixed(2)}%`,
       left: 'center',
       top: 'center',
       textStyle: {
@@ -31,12 +33,12 @@ export function WinRateCircleChart({ title, winRate, color }: WinRateCircleChart
         labelLine: { show: false },
         data: [
           { 
-            value: winRate, 
+            value: displayRate, 
             name: '获胜', 
             itemStyle: { color: color } 
           },
           { 
-            value: 100 - winRate, 
+            value: Math.max(0, 100 - displayRate), 
             name: '失败', 
             itemStyle: { color: '#2B3139' } 
           }

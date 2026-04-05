@@ -10,6 +10,7 @@ interface KLineChartProps {
   openPrice: number;
   closePrice: number | null;
   side: string;         // "LONG" | "SHORT" | "buy" | "sell"
+  interval?: string;    // 手动指定 K 线周期，如 "1m", "5m" 等
 }
 
 // 根据持仓时长自动选取合适的 K 线周期
@@ -19,11 +20,25 @@ function resolveInterval(openDate: string, closeDate: string | null) {
   const dur   = close - open;
   const H = 3_600_000;
 
-  if (dur < 2 * H)        return { interval: '1m',  paddingMs: 30 * 60_000 };
-  if (dur < 12 * H)       return { interval: '5m',  paddingMs: 2 * H };
-  if (dur < 3 * 24 * H)   return { interval: '1h',  paddingMs: 6 * H };
-  if (dur < 14 * 24 * H)  return { interval: '4h',  paddingMs: 24 * H };
-  return                         { interval: '1d',  paddingMs: 3 * 24 * H };
+  if (dur < 2 * H)        return '1m';
+  if (dur < 12 * H)       return '5m';
+  if (dur < 3 * 24 * H)   return '1h';
+  if (dur < 14 * 24 * H)  return '4h';
+  return                  '1d';
+}
+
+function getIntervalMs(interval: string): number {
+  const unit = interval.slice(-1);
+  const val = parseInt(interval.slice(0, -1)) || 1;
+  const minute = 60_000;
+  switch (unit) {
+    case 'm': return val * minute;
+    case 'h': return val * 60 * minute;
+    case 'd': return val * 24 * 60 * minute;
+    case 'w': return val * 7 * 24 * 60 * minute;
+    case 'M': return val * 30 * 24 * 60 * minute;
+    default: return 60 * minute;
+  }
 }
 
 // Binance 返回的 kline 数组: [openTime, open, high, low, close, ...]
@@ -41,7 +56,7 @@ async function fetchKlines(
     interval,
     startTime: String(startTime),
     endTime:   String(endTime),
-    limit:     '1500',
+    limit:     '500',
   });
 
   const url = useProxy
@@ -60,6 +75,7 @@ export function KLineChart({
   openPrice,
   closePrice,
   side,
+  interval,
 }: KLineChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<'loading' | 'ok' | 'error'>('loading');
@@ -69,19 +85,36 @@ export function KLineChart({
 
   const load = useCallback(async () => {
     setStatus('loading');
-    const { interval, paddingMs } = resolveInterval(openDate, closeDate);
-    const startTime = new Date(openDate).getTime() - paddingMs;
-    const endTime   = (closeDate ? new Date(closeDate).getTime() : Date.now()) + paddingMs;
+    const autoInterval = resolveInterval(openDate, closeDate);
+    const usedInterval = interval || autoInterval;
+    
+    const intervalMs = getIntervalMs(usedInterval);
+    const maxCandles = 500;
+    
+    // Provide a generous padding of ~50 candles on each side to ensure context
+    const paddingMs = 50 * intervalMs;
+    let startTime = new Date(openDate).getTime() - paddingMs;
+    let endTime   = (closeDate ? new Date(closeDate).getTime() : Date.now()) + paddingMs;
+
+    // 如果总时间跨度超过了 500 根 K 线，则以持仓中点为中心，截取 500 根
+    const totalCandles = (endTime - startTime) / intervalMs;
+    if (totalCandles > maxCandles) {
+      const openTime = new Date(openDate).getTime();
+      const closeTime = closeDate ? new Date(closeDate).getTime() : Date.now();
+      const midPoint = (openTime + closeTime) / 2;
+      startTime = midPoint - (maxCandles / 2) * intervalMs;
+      endTime = midPoint + (maxCandles / 2) * intervalMs;
+    }
 
     let klines: BinanceKline[] | null = null;
 
     // 1️⃣ 优先尝试浏览器直连
     try {
-      klines = await fetchKlines(symbol, interval, startTime, endTime, false);
+      klines = await fetchKlines(symbol, usedInterval, startTime, endTime, false);
     } catch {
       // 直连失败 → 降级到服务端代理
       try {
-        klines = await fetchKlines(symbol, interval, startTime, endTime, true);
+        klines = await fetchKlines(symbol, usedInterval, startTime, endTime, true);
       } catch (err) {
         setErrMsg(err instanceof Error ? err.message : String(err));
         setStatus('error');
@@ -96,8 +129,8 @@ export function KLineChart({
     }
 
     setStatus('ok');
-    renderChart(klines, interval);
-  }, [symbol, openDate, closeDate, openPrice, closePrice, side]); // eslint-disable-line
+    renderChart(klines, usedInterval);
+  }, [symbol, openDate, closeDate, openPrice, closePrice, side, interval]); // eslint-disable-line
 
   useEffect(() => { load(); }, [load]);
 
@@ -122,7 +155,20 @@ export function KLineChart({
         timeVisible: true,
         secondsVisible: interval === '1m',
       },
+      rightPriceScale: {
+        autoScale: true,
+      },
     });
+
+    // Calculate appropriate precision based on prices
+    const prices = klines.map(k => parseFloat(k[4] as string));
+    const maxPrice = Math.max(...prices);
+    
+    let precision = 2;
+    if (maxPrice < 0.001) precision = 6;
+    else if (maxPrice < 0.1) precision = 5;
+    else if (maxPrice < 1) precision = 4;
+    else if (maxPrice < 10) precision = 3;
 
     const series = chart.addCandlestickSeries({
       upColor:      '#22ab94',
@@ -130,6 +176,11 @@ export function KLineChart({
       borderVisible: false,
       wickUpColor:  '#22ab94',
       wickDownColor:'#f23645',
+      priceFormat: {
+        type: 'price',
+        precision: precision,
+        minMove: 1 / Math.pow(10, precision),
+      },
     });
 
     const data: CandlestickData<Time>[] = klines.map(k => ({

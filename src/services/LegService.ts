@@ -13,10 +13,19 @@ export interface LegFilter {
   side?: LegSide;
   startDate?: Date;
   endDate?: Date;
+  apiKeyId?: number;
   page?: number;
   pageSize?: number;
   sortBy?: 'openDate' | 'closeDate' | 'netPnL' | 'duration';
   sortOrder?: 'asc' | 'desc';
+}
+
+export interface CommonFilter {
+  userId: number;
+  startDate?: Date;
+  endDate?: Date;
+  symbol?: string;
+  apiKeyId?: number;
 }
 
 export interface LegStats {
@@ -38,6 +47,40 @@ export interface LegStats {
 
 export class LegService {
   /**
+   * 辅助私有方法：构建通用的 Prisma where 条件
+   */
+  private static buildWhereClause(filter: CommonFilter, includeStatusClosed: boolean = true) {
+    const { userId, startDate, endDate, symbol, apiKeyId } = filter;
+    const where: any = { userId };
+
+    if (includeStatusClosed) {
+      where.status = 'CLOSED';
+    }
+
+    if (symbol) {
+      where.symbol = symbol;
+    }
+
+    if (apiKeyId) {
+      // 通过关联的 trades 过滤 apiKey
+      where.trades = {
+        some: {
+          apiKeyId: apiKeyId
+        }
+      };
+    }
+
+    if (startDate || endDate) {
+      // 统计通常基于平仓时间
+      where.closeDate = {};
+      if (startDate) where.closeDate.gte = startDate;
+      if (endDate) where.closeDate.lte = endDate;
+    }
+
+    return where;
+  }
+
+  /**
    * 获取 Legs 列表 (支持筛选和分页)
    */
   static async getLegs(filter: LegFilter) {
@@ -48,6 +91,7 @@ export class LegService {
       side,
       startDate,
       endDate,
+      apiKeyId,
       page = 1,
       pageSize = 20,
       sortBy = 'openDate',
@@ -61,7 +105,12 @@ export class LegService {
     if (symbol) where.symbol = symbol;
     if (side) where.side = side;
     
+    if (apiKeyId) {
+      where.trades = { some: { apiKeyId } };
+    }
+    
     if (startDate || endDate) {
+      // 列表查询默认基于开仓时间，统计基于平仓时间
       where.openDate = {};
       if (startDate) where.openDate.gte = startDate;
       if (endDate) where.openDate.lte = endDate;
@@ -187,13 +236,12 @@ export class LegService {
   /**
    * 获取统计数据
    */
-  static async getStats(userId: number): Promise<LegStats> {
-    // 获取所有已平仓的 Leg
+  static async getStats(filter: CommonFilter): Promise<LegStats> {
+    const where = this.buildWhereClause(filter, true);
+    
+    // 获取所有匹配过滤条件的已平仓 Leg
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-      },
+      where,
       select: {
         netPnL: true,
         commission: true,
@@ -201,7 +249,9 @@ export class LegService {
       },
     });
     
-    const totalLegs = await prisma.leg.count({ where: { userId } });
+    const totalLegs = await prisma.leg.count({ 
+      where: { ...where, status: undefined } // 这里的总数不限 CLOSED 状态，但受筛选器影响
+    });
     const closedLegs = legs.length;
     const openLegs = totalLegs - closedLegs;
     
@@ -226,6 +276,10 @@ export class LegService {
     
     const profitFactor = totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Infinity : 0;
     
+    // 目前没有记录出入金和真实账户初始资金，因此余额暂以 0 + 累计盈亏 计算
+    // 后续可对接交易所 API 获取真实账户 Equity
+    const balance = totalPnL;
+
     return {
       totalLegs,
       closedLegs,
@@ -244,22 +298,21 @@ export class LegService {
     };
   }
   
-  /**
+/**
    * 获取累计盈亏曲线数据
    */
-  static async getPnLCurve(userId: number, days: number = 30) {
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - days);
+  static async getPnLCurve(filter: CommonFilter, days: number = 30) {
+    // 补全默认的时间范围，利用 days 向前推算，提升数据库查询性能
+    const endDate = filter.endDate || new Date();
+    const startDate = filter.startDate || new Date(endDate.getTime() - (days - 1) * 24 * 60 * 60 * 1000);
     
-    // 获取指定时间范围内的所有已平仓 Leg
+    // 合并过滤条件
+    const activeFilter = { ...filter, startDate, endDate };
+    const where = this.buildWhereClause(activeFilter, true);
+    
+    // 获取指定条件下的所有已平仓 Leg
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-        closeDate: {
-          gte: startDate,
-        },
-      },
+      where,
       select: {
         closeDate: true,
         netPnL: true,
@@ -268,18 +321,21 @@ export class LegService {
         closeDate: 'asc',
       },
     });
+
+    if (legs.length === 0) return [];
     
     // 按天累加盈亏
     const curveData: { date: string; cumulativePnL: number; closedLegs: number }[] = [];
     let cumulativePnL = 0;
     
-    // 生成每天的數據
-    for (let i = 0; i < days; i++) {
+    const diffTime = Math.abs(endDate.getTime() - startDate.getTime());
+    const daysCount = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+
+    for (let i = 0; i < daysCount; i++) {
       const date = new Date(startDate);
       date.setDate(date.getDate() + i);
       const dateStr = date.toISOString().split('T')[0];
       
-      // 加上当天平仓的所有 Leg 的盈亏
       const legsOnThisDay = legs.filter(
         l => l.closeDate && new Date(l.closeDate).toISOString().split('T')[0] === dateStr
       );
@@ -301,12 +357,10 @@ export class LegService {
   /**
    * 按交易对统计
    */
-  static async getStatsBySymbol(userId: number) {
+  static async getStatsBySymbol(filter: CommonFilter) {
+    const where = this.buildWhereClause(filter, true);
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-      },
+      where,
       select: {
         symbol: true,
         netPnL: true,
@@ -365,20 +419,16 @@ export class LegService {
   /**
    * 按星期几统计
    */
-  static async getWeekdayStats(userId: number) {
+  static async getWeekdayStats(filter: CommonFilter) {
+    const where = this.buildWhereClause(filter, true);
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-        closeDate: { not: null },
-      },
+      where,
       select: {
         closeDate: true,
         netPnL: true,
       },
     });
 
-    // 初始化星期统计 (1=周一, 7=周日)
     const weekdayStats = Array.from({ length: 7 }, (_, i) => ({
       rangeStart: i + 1,
       countLegs: 0,
@@ -387,12 +437,9 @@ export class LegService {
 
     legs.forEach(leg => {
       if (leg.closeDate) {
-        // getDay() 返回 0=周日, 1=周一...6=周六
         const dayOfWeek = new Date(leg.closeDate).getDay();
-        // 转换为 1=周一, 7=周日
         const weekday = dayOfWeek === 0 ? 7 : dayOfWeek;
         const idx = weekday - 1;
-
         weekdayStats[idx].countLegs += 1;
         weekdayStats[idx].totalRealisedPnL += leg.netPnL;
       }
@@ -404,20 +451,16 @@ export class LegService {
   /**
    * 按小时统计
    */
-  static async getHourlyStats(userId: number) {
+  static async getHourlyStats(filter: CommonFilter) {
+    const where = this.buildWhereClause(filter, true);
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-        closeDate: { not: null },
-      },
+      where,
       select: {
         closeDate: true,
         netPnL: true,
       },
     });
 
-    // 初始化24小时统计
     const hourlyStats = Array.from({ length: 24 }, (_, i) => ({
       rangeStart: i,
       countLegs: 0,
@@ -438,20 +481,16 @@ export class LegService {
   /**
    * 按持续时间统计
    */
-  static async getDurationStats(userId: number) {
+  static async getDurationStats(filter: CommonFilter) {
+    const where = this.buildWhereClause(filter, true);
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-        duration: { not: null },
-      },
+      where,
       select: {
         duration: true,
         netPnL: true,
       },
     });
 
-    // 定义持续时间区间（秒）
     const ranges = [
       { label: '0-1小时', min: 0, max: 3600, count: 0, pnl: 0 },
       { label: '1-4小时', min: 3600, max: 14400, count: 0, pnl: 0 },
@@ -481,19 +520,16 @@ export class LegService {
   /**
    * 按交易规模统计
    */
-  static async getSizeStats(userId: number) {
+  static async getSizeStats(filter: CommonFilter) {
+    const where = this.buildWhereClause(filter, true);
     const legs = await prisma.leg.findMany({
-      where: {
-        userId,
-        status: 'CLOSED',
-      },
+      where,
       select: {
         sizeUsd: true,
         netPnL: true,
       },
     });
 
-    // 定义规模区间
     const ranges = [
       { rangeStart: 0, rangeEnd: 100, wins: 0, loss: 0 },
       { rangeStart: 100, rangeEnd: 500, wins: 0, loss: 0 },
@@ -523,14 +559,9 @@ export class LegService {
   /**
    * 获取每日盈亏（用于日历）
    */
-  static async getDailyPnL(userId: number, year?: number, month?: number) {
-    const where: any = {
-      userId,
-      status: 'CLOSED',
-      closeDate: { not: null },
-    };
+  static async getDailyPnL(filter: CommonFilter, year?: number, month?: number) {
+    const where = this.buildWhereClause(filter, true);
 
-    // 如果指定了年月，则筛选该月份
     if (year && month) {
       const startDate = new Date(year, month - 1, 1);
       const endDate = new Date(year, month, 0, 23, 59, 59);
@@ -548,7 +579,6 @@ export class LegService {
       },
     });
 
-    // 按日期聚合
     const dailyMap: Record<string, { date: string; pnl: number; count: number }> = {};
 
     legs.forEach(leg => {

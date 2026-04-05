@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { Wallet } from "lucide-react";
 import Sidebar from "@/components/Sidebar";
+import { NetWorthDisplay } from "@/components/NetWorthDisplay";
 
 export const metadata: Metadata = {
   title: "Trading Dashboard",
@@ -30,8 +31,8 @@ export default function RootLayout({
         <footer className="h-10 bg-panel/80 border-t border-border flex items-center justify-between px-6 text-xs text-textMuted shrink-0 z-50 backdrop-blur-md relative">
           <div className="flex items-center gap-2 font-mono">
             <Wallet size={12} className="text-blue-400"/>
-            <span>净值:</span>
-            <span className="font-bold text-white tracking-wider">$1,086.24</span>
+            <span>余额:</span>
+            <NetWorthDisplay />
           </div>
           
           <div className="flex items-center gap-6 font-medium">

@@ -60,6 +60,18 @@ export function aggregateTradesToLegs(trades: RawTrade[]) {
 
             if (!pos) {
                 // ============== 1. 开新仓 ==============
+                // 防御：双向持仓模式 (Hedge Mode) 下，拦截孤立平仓单
+                // 在双向持仓下：LONG 频道只应有 BUY 开仓，SHORT 频道只应有 SELL 开仓
+                if (ps !== 'BOTH') {
+                    const isClosingInHedge = (ps === 'LONG' && remainingAmount < 0) || 
+                                           (ps === 'SHORT' && remainingAmount > 0);
+                    if (isClosingInHedge) {
+                        console.error(`[Edge Case] 发现无头平仓单: ${trade.symbol} ${ps} ${trade.side}, 数量 ${trade.amount}, 时间 ${trade.timestamp.toISOString()}。因内存无底仓，已拦截防止反向开仓。`);
+                        remainingAmount = 0;
+                        break;
+                    }
+                }
+
                 pos = {
                     symbol: trade.symbol,
                     baseAsset: trade.baseAsset,

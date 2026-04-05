@@ -1,12 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { Overview } from "@/components/Overview";
 import { Card } from "@/components/Card";
 import { CumulativePnLChart } from "@/components/CumulativePnLChart";
 import { TradeDetail } from "@/components/TradeDetail";
-import { legsApi, accountsApi, type Leg } from "@/lib/api-client";
-import { format } from "date-fns";
+import { legsApi, accountsApi, type Leg, type GlobalFilter } from "@/lib/api-client";
+import { format, subDays, startOfDay, endOfDay, formatISO } from "date-fns";
 import { ChevronDown, SlidersHorizontal, Settings2, Loader2, Wallet, RefreshCw } from "lucide-react";
 
 // 格式化秒数为直观的耗时
@@ -25,6 +25,19 @@ export default function Home() {
   const [selectedTrade, setSelectedTrade] = useState<Leg | null>(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   
+  // 账户状态
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncingAccountId, setSyncingAccountId] = useState<number | null>(null);
+
+  // 筛选器状态
+  const [timeframe, setTimeframe] = useState('30d');
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [customEndDate, setCustomEndDate] = useState('');
+  const [selectedAccountId, setSelectedAccountId] = useState<number | undefined>(undefined);
+  const [selectedSymbol, setSelectedSymbol] = useState<string | undefined>(undefined);
+
   // 数据状态
   const [legs, setLegs] = useState<Leg[]>([]);
   const [loading, setLoading] = useState(true);
@@ -34,13 +47,30 @@ export default function Home() {
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [total, setTotal] = useState(0);
-  
-  // 账户状态
-  const [accounts, setAccounts] = useState<any[]>([]);
-  const [isSyncModalOpen, setIsSyncModalOpen] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [syncingAccountId, setSyncingAccountId] = useState<number | null>(null);
 
+  // 计算 GlobalFilter 对象
+  const filters = useMemo((): GlobalFilter => {
+    let startDate: string | undefined;
+    let endDate = formatISO(endOfDay(new Date()));
+
+    if (timeframe === '7d') {
+      startDate = formatISO(startOfDay(subDays(new Date(), 7)));
+    } else if (timeframe === '30d') {
+      startDate = formatISO(startOfDay(subDays(new Date(), 30)));
+    } else if (timeframe === '90d') {
+      startDate = formatISO(startOfDay(subDays(new Date(), 90)));
+    } else if (timeframe === 'custom') {
+      if (customStartDate) startDate = formatISO(startOfDay(new Date(customStartDate)));
+      if (customEndDate) endDate = formatISO(endOfDay(new Date(customEndDate)));
+    }
+
+    return {
+      startDate,
+      endDate,
+      apiKeyId: selectedAccountId,
+      symbol: selectedSymbol,
+    };
+  }, [timeframe, customStartDate, customEndDate, selectedAccountId, selectedSymbol]);
   // 加载 Legs 数据
   const loadLegs = useCallback(async () => {
     try {
@@ -50,6 +80,7 @@ export default function Home() {
         pageSize,
         sortBy: 'closeDate',
         sortOrder: 'desc',
+        ...filters, // 传入筛选参数
       });
       
       setLegs(result.data || []);
@@ -61,7 +92,7 @@ export default function Home() {
     } finally {
       setLoading(false);
     }
-  }, [currentPage, pageSize]);
+  }, [currentPage, pageSize, filters]);
 
   // 加载账户列表
   const loadAccounts = useCallback(async () => {
@@ -99,67 +130,103 @@ export default function Home() {
 
   return (
     <div className="space-y-8 pb-12 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      <header className="flex justify-between items-end relative z-20">
+      <header className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 relative z-20">
         <div>
           <h1 className="text-3xl font-bold text-white tracking-tight">交易报告与分析</h1>
           <p className="text-textMuted mt-2 text-lg">回顾您的交易表现，优化您的策略</p>
         </div>
         
-        <div className="flex gap-3">
-          <div className="relative">
-            <button 
-              onClick={() => setIsFilterOpen(!isFilterOpen)}
-              className="bg-panel border border-border px-4 py-2 rounded-md text-sm text-textMain hover:bg-panel/80 transition-colors flex items-center gap-2"
-            >
-              <SlidersHorizontal size={14} />
-              <span className="hidden md:inline">筛选器</span>
-              <ChevronDown size={14} className={`transition-transform ${isFilterOpen ? 'rotate-180' : ''}`} />
-            </button>
-            
-            {isFilterOpen && (
-              <div className="absolute right-0 top-full mt-2 w-64 bg-panel border border-border rounded-lg shadow-xl p-4 z-50">
-                <div className="mb-4">
-                  <label className="text-xs font-semibold text-textMuted block mb-1">选择账户</label>
-                  <select className="w-full bg-background border border-border text-white text-sm rounded-md px-2 py-1.5 focus:outline-none focus:border-blue-500">
-                    <option value="all">全账户汇总</option>
-                    {accounts.map(acc => (
-                      <option key={acc.id} value={acc.id}>{acc.name} ({acc.exchange})</option>
-                    ))}
-                  </select>
+        <div className="flex flex-wrap items-center gap-4 w-full lg:w-auto bg-panel/40 p-4 rounded-xl border border-border/50">
+          <div className="flex flex-col gap-1.5 min-w-[140px]">
+            <label className="text-[10px] font-bold text-textMuted uppercase tracking-wider ml-1">时间范围</label>
+            <div className="flex items-center gap-2">
+              <select 
+                value={timeframe}
+                onChange={(e) => setTimeframe(e.target.value)}
+                className="bg-panel border border-border text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500 transition-all hover:bg-white/5 cursor-pointer"
+              >
+                <option value="all" className="bg-[#1e222d]">全部时间</option>
+                <option value="7d" className="bg-[#1e222d]">最近 7 天</option>
+                <option value="30d" className="bg-[#1e222d]">最近 30 天</option>
+                <option value="90d" className="bg-[#1e222d]">最近 90 天</option>
+                <option value="custom" className="bg-[#1e222d]">自定义</option>
+              </select>
+              
+              {timeframe === 'custom' && (
+                <div className="flex items-center gap-2 animate-in fade-in zoom-in-95 duration-200">
+                  <input 
+                    type="date"
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value)}
+                    className="bg-panel border border-border text-white text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-blue-500"
+                  />
+                  <span className="text-textMuted">-</span>
+                  <input 
+                    type="date"
+                    value={customEndDate}
+                    onChange={(e) => setCustomEndDate(e.target.value)}
+                    className="bg-panel border border-border text-white text-xs rounded-lg px-2 py-2 focus:outline-none focus:border-blue-500"
+                  />
                 </div>
-                <div className="mb-4">
-                  <label className="text-xs font-semibold text-textMuted block mb-1">时间范围</label>
-                  <select defaultValue="30d" className="w-full bg-background border border-border text-white text-sm rounded-md px-2 py-1.5 focus:outline-none focus:border-blue-500">
-                    <option value="7d">最近 7 天</option>
-                    <option value="30d">最近 30 天</option>
-                    <option value="90d">最近 90 天</option>
-                  </select>
-                </div>
-                <button 
-                  onClick={() => setIsFilterOpen(false)}
-                  className="w-full bg-blue-600/20 text-blue-500 font-medium text-sm py-2 rounded-md hover:bg-blue-600/30 transition-colors"
-                >
-                  应用筛选
-                </button>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
-          <button 
-            onClick={() => setIsSyncModalOpen(true)}
-            className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-500 transition-colors shadow-lg shadow-blue-600/20 flex items-center gap-2"
-          >
-            <Settings2 size={14} />
-            <span className="hidden md:inline">数据同步</span>
-          </button>
+          <div className="flex flex-col gap-1.5 min-w-[140px]">
+            <label className="text-[10px] font-bold text-textMuted uppercase tracking-wider ml-1">选择账户</label>
+            <select 
+              value={selectedAccountId || ''}
+              onChange={(e) => setSelectedAccountId(e.target.value ? parseInt(e.target.value) : undefined)}
+              className="bg-panel border border-border text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500 transition-all hover:bg-white/5 cursor-pointer"
+            >
+              <option value="" className="bg-[#1e222d]">全账户汇总</option>
+              {accounts.map(acc => (
+                <option key={acc.id} value={acc.id} className="bg-[#1e222d]">{acc.name} ({acc.exchange})</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex flex-col gap-1.5 min-w-[140px]">
+            <label className="text-[10px] font-bold text-textMuted uppercase tracking-wider ml-1">交易对搜索</label>
+            <input 
+              type="text"
+              placeholder="BTCUSDT"
+              value={selectedSymbol || ''}
+              onChange={(e) => setSelectedSymbol(e.target.value.toUpperCase() || undefined)}
+              className="bg-panel border border-border text-white text-sm rounded-lg px-3 py-2 focus:outline-none focus:border-blue-500 transition-all hover:bg-white/5"
+            />
+          </div>
+
+          <div className="flex items-end gap-2 h-full mt-auto pb-0.5">
+            <button 
+              onClick={() => {
+                setTimeframe('30d');
+                setSelectedAccountId(undefined);
+                setSelectedSymbol(undefined);
+                setCustomStartDate('');
+                setCustomEndDate('');
+              }}
+              className="p-2 bg-white/5 hover:bg-white/10 text-textMuted rounded-lg transition-colors group border border-border/50"
+              title="重置筛选"
+            >
+              <RefreshCw size={18} className="group-active:rotate-180 transition-transform duration-500" />
+            </button>
+            <button 
+              onClick={() => setIsSyncModalOpen(true)}
+              className="bg-blue-600/10 text-blue-500 p-2 rounded-lg hover:bg-blue-600/20 transition-all border border-blue-500/30"
+              title="数据同步"
+            >
+              <Settings2 size={18} />
+            </button>
+          </div>
         </div>
       </header>
 
-      <Overview />
+      <Overview filters={filters} />
 
       <div className="relative z-10">
         <Card title="累计盈亏 (PNL Curve)" className="h-[350px]">
-           <CumulativePnLChart />
+           <CumulativePnLChart filters={filters} />
         </Card>
       </div>
 
@@ -176,7 +243,7 @@ export default function Home() {
               </div>
             ) : legs.length === 0 ? (
               <div className="flex items-center justify-center h-64 text-textMuted">
-                暂无交易记录，请先同步交易所数据
+                暂无符合筛选条件的交易记录
               </div>
             ) : (
               <>
@@ -268,7 +335,7 @@ export default function Home() {
       {/* 同步弹窗 */}
       {isSyncModalOpen && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-panel border border-border rounded-xl shadow-2xl w-full max-w-md p-6">
+          <div className="bg-panel border border-border rounded-xl shadow-2xl w-full max-md p-6">
             <h2 className="text-xl font-bold text-white mb-6">快速数据同步</h2>
             <div className="space-y-3 max-h-[300px] overflow-y-auto mb-6 pr-1">
               {accounts.map((account) => (

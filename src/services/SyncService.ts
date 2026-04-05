@@ -9,6 +9,7 @@ import { FundingFeeService } from './FundingFeeService';
 import { MaeMfeService } from './MaeMfeService';
 import { aggregateTradesToLegs, RawTrade } from '@/lib/trade-aggregator';
 import type { Exchange } from '@prisma/client';
+import { BinanceCsvService } from './BinanceCsvService';
 
 // 不同交易所的 CCXT ID 映射
 const EXCHANGE_MAP: Record<Exchange, string> = {
@@ -241,36 +242,7 @@ export class SyncService {
       const importedCount = await this.saveTradesBatch(uniqueTrades, apiKeyId);
 
       // ── 全量重聚合 ─────────────────────────────────────────────────────
-      // 必须用数据库全量交易而非仅本次 uniqueTrades。
-      // 原因：开仓和平仓交易可能分属不同同步批次，若只传新交易，聚合器无法
-      // 找到配对的开/平仓，导致已平仓 Leg 的 PnL = 0 或状态错误。
-      const allDbTrades = await prisma.trade.findMany({
-        where: { apiKeyId },
-        orderBy: { timestamp: 'asc' },
-      });
-
-      const tradesForAggregation: RawTrade[] = allDbTrades.map(t => ({
-        id:           t.id,
-        symbol:       t.symbol,
-        baseAsset:    t.baseAsset,
-        quoteAsset:   t.quoteAsset,
-        side:         t.side.toLowerCase(),
-        positionSide: t.positionSide,
-        price:        t.price,
-        amount:       t.amount,
-        fee:          t.fee,
-        feeAsset:     t.feeAsset,
-        feeUsd:       t.feeUsd,
-        timestamp:    t.timestamp,
-      }));
-
-      console.log(`从数据库读取 ${tradesForAggregation.length} 条交易用于全量聚合`);
-
-      const legs = aggregateTradesToLegs(tradesForAggregation);
-      console.log(`聚合生成 ${legs.length} 个持仓`);
-
-      // 批量保存 Legs，取回新建 Leg 的 ID 用于后续异步计算
-      const { created, updated, newLegIds } = await this.saveLegsBatch(legs, userId);
+      const result = await this.recalculateLegs(apiKeyId, userId);
 
       // 更新同步状态
       await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED');
@@ -280,29 +252,37 @@ export class SyncService {
         status: 'COMPLETED',
         tradesFound: uniqueTrades.length,
         tradesImported: importedCount,
-        legsCreated: created,
-        legsUpdated: updated,
+        legsCreated: result.created,
+        legsUpdated: result.updated,
       });
 
       // ── 异步后处理（fire-and-forget，不阻塞主流程响应） ──────────────
-      // 资金费同步：拉取并归集到 Leg，更新 netPnL
-      FundingFeeService.sync(exchange, apiKeyId, since).catch(err =>
-        console.error('[FundingFee] 后台同步失败:', err instanceof Error ? err.message : err)
-      );
+      // 为避免并发请求同一 CCXT 实例触发交易所严格的并发/IP限流（如 Binance 418 Ban），
+      // 将资金费同步和 MAE/MFE 计算在后台串行执行。
+      // (async () => {
+      //   try {
+      //     // 1. 先同步资金费
+      //     await FundingFeeService.sync(exchange, apiKeyId, since);
+      //   } catch (err) {
+      //     console.error('[FundingFee] 后台同步失败:', err instanceof Error ? err.message : err);
+      //   }
 
-      // MAE/MFE 计算：对本次新建的已平仓 Leg 拉取 K 线并写入
-      if (newLegIds.length > 0) {
-        MaeMfeService.calculate(exchange, newLegIds).catch(err =>
-          console.error('[MAE/MFE] 后台计算失败:', err instanceof Error ? err.message : err)
-        );
-      }
+      //   try {
+      //     // 2. 资金费同步完成后，再进行 MAE/MFE 计算
+      //     if (result.newLegIds.length > 0) {
+      //       await MaeMfeService.calculate(exchange, result.newLegIds);
+      //     }
+      //   } catch (err) {
+      //     console.error('[MAE/MFE] 后台计算失败:', err instanceof Error ? err.message : err);
+      //   }
+      // })();
       // ────────────────────────────────────────────────────────────────
 
       return {
         tradesFound: uniqueTrades.length,
         tradesImported: importedCount,
-        legsCreated: created,
-        legsUpdated: updated,
+        legsCreated: result.created,
+        legsUpdated: result.updated,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : '同步失败';
@@ -322,23 +302,189 @@ export class SyncService {
       throw error;
     }
   }
+
+  /**
+   * 通过上传的 CSV 数据同步
+   */
+  static async syncByCsv(apiKeyId: number, csvContent: string): Promise<SyncResult> {
+    const userId = await this.getUserIdByApiKey(apiKeyId);
+    const trades = BinanceCsvService.parseTradeHistory(csvContent);
+    
+    if (trades.length === 0) {
+      throw new Error('CSV 文件解析为空或格式不匹配');
+    }
+
+    const importedCount = await this.saveTradesBatch(trades, apiKeyId);
+    const result = await this.recalculateLegs(apiKeyId, userId);
+
+    return {
+      tradesFound: trades.length,
+      tradesImported: importedCount,
+      legsCreated: result.created,
+      legsUpdated: result.updated,
+    };
+  }
+
+  /**
+   * 申请异步 API 导出 (Binance)
+   */
+  static async requestAsynSync(apiKeyId: number): Promise<{ downloadId: string; quotaRemaining: number }> {
+    const apiKeyDb = await prisma.apiKey.findUnique({
+      where: { id: apiKeyId },
+      include: { user: true }
+    });
+
+    if (!apiKeyDb) throw new Error('API Key 不存在');
+    if (apiKeyDb.exchange !== 'BINANCE') throw new Error('异步同步目前仅支持币安');
+
+    // 额度检查 (5次/月)
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    // 如果上次同步时间在本月之前，重置计数器
+    let count = apiKeyDb.asynSyncCount || 0;
+    if (apiKeyDb.lastAsynSyncAt && apiKeyDb.lastAsynSyncAt < startOfMonth) {
+      count = 0;
+    }
+
+    if (count >= 5) {
+      throw new Error('本月 API 深度同步额度已用完 (5/5)');
+    }
+
+    // 初始化 CCXT
+    const ccxt = await import('ccxt');
+    const exchange = new ccxt.binance({
+      apiKey: apiKeyDb.apiKey, // API Key 本身就是明文存储的
+      secret: await ApiKeyService.decrypt(apiKeyDb.apiSecret), // 仅 Secret 是加密的
+      enableRateLimit: true,
+      httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+    });
+
+    // 申请下载 ID
+    // 过去一年的数据
+    const endTime = Date.now();
+    const startTime = endTime - 365 * 24 * 60 * 60 * 1000;
+
+    const response = await (exchange as any).fapiPrivateGetTradeAsyn({
+      startTime,
+      endTime,
+      timestamp: Date.now(),
+    });
+
+    const downloadId = response.downloadId;
+    
+    // 检查币安是否返回了额度（虽然文档未明确，但有些版本的接口会返回）
+    const apiRemaining = response.remainingQuota;
+
+    // 1. 更新 ApiKey 表（仅更新额度和时间，不再锁定状态）
+    await prisma.apiKey.update({
+      where: { id: apiKeyId },
+      data: {
+        asynSyncCount: apiRemaining !== undefined ? (5 - apiRemaining) : { increment: 1 },
+        lastAsynSyncAt: now,
+        // 这里删除了 syncStatus: 'SYNCING'
+      }
+    });
+
+    // 2. 创建异步任务历史记录
+    await prisma.asyncSyncTask.create({
+      data: {
+        apiKeyId,
+        downloadId,
+        status: 'processing',
+      }
+    });
+
+    const quotaRemaining = apiRemaining !== undefined ? apiRemaining : (5 - (count + 1));
+
+    return { 
+      downloadId, 
+      quotaRemaining
+    };
+  }
+
+  /**
+   * 轮询检查异步 API 状态
+   */
+  static async checkAsynSyncStatus(apiKeyId: number, downloadId: string): Promise<{ status: string; url?: string }> {
+    const apiKeyDb = await prisma.apiKey.findUnique({
+      where: { id: apiKeyId }
+    });
+
+    if (!apiKeyDb) throw new Error('API Key 不存在');
+
+    const ccxt = await import('ccxt');
+    const exchange = new ccxt.binance({
+      apiKey: apiKeyDb.apiKey,
+      secret: await ApiKeyService.decrypt(apiKeyDb.apiSecret),
+      enableRateLimit: true,
+      httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+    });
+
+    const response = await (exchange as any).fapiPrivateGetTradeAsynId({
+      downloadId,
+      timestamp: Date.now(),
+    });
+
+    // 持久化更新任务状态
+    await prisma.asyncSyncTask.update({
+      where: { downloadId },
+      data: {
+        status: response.status,
+        downloadUrl: response.url || undefined,
+      }
+    });
+
+    return {
+      status: response.status, // "completed" or "processing"
+      url: response.url
+    };
+  }
+
+  /**
+   * 辅助方法：重新聚合所有 Legs
+   */
+  private static async recalculateLegs(apiKeyId: number, userId: number) {
+    const allDbTrades = await prisma.trade.findMany({
+      where: { apiKeyId },
+      orderBy: { timestamp: 'asc' },
+    });
+
+    const tradesForAggregation: RawTrade[] = allDbTrades.map(t => ({
+      id:           t.id,
+      symbol:       t.symbol,
+      baseAsset:    t.baseAsset,
+      quoteAsset:   t.quoteAsset,
+      side:         t.side.toLowerCase(),
+      positionSide: t.positionSide,
+      price:        t.price,
+      amount:       t.amount,
+      fee:          t.fee,
+      feeAsset:     t.feeAsset,
+      feeUsd:       t.feeUsd,
+      timestamp:    t.timestamp,
+    }));
+
+    const legs = aggregateTradesToLegs(tradesForAggregation);
+    return await this.saveLegsBatch(legs, userId);
+  }
   
   /**
-   * 批量保存 Trades 到数据库
+   * 批量保存 Trades 到数据库 (优化版：分批写入避免参数限制)
    */
   private static async saveTradesBatch(
     trades: RawTrade[],
     apiKeyId: number
   ): Promise<number> {
-    if (trades.length === 0) {
-      console.log('没有交易记录需要保存');
-      return 0;
-    }
+    if (trades.length === 0) return 0;
 
-    try {
-      // 批量插入，自动跳过重复的 ID
+    const CHUNK_SIZE = 1000;
+    let totalImported = 0;
+
+    for (let i = 0; i < trades.length; i += CHUNK_SIZE) {
+      const chunk = trades.slice(i, i + CHUNK_SIZE);
       const result = await prisma.trade.createMany({
-        data: trades.map(trade => ({
+        data: chunk.map(trade => ({
           id: trade.id,
           apiKeyId,
           symbol: trade.symbol,
@@ -354,93 +500,123 @@ export class SyncService {
           feeUsd: trade.feeUsd,
           timestamp: trade.timestamp,
         })),
-        skipDuplicates: true, // 跳过重复的 ID
+        skipDuplicates: true,
       });
-
-      console.log(`保存 ${result.count} 条新交易记录到数据库`);
-      return result.count;
-    } catch (error) {
-      console.error('保存交易记录失败:', error);
-      throw error;
+      totalImported += result.count;
     }
+
+    console.log(`保存完成：共处理 ${trades.length} 条记录，其中 ${totalImported} 条为新数据`);
+    return totalImported;
   }
   
   /**
-   * 批量保存/更新 Legs，返回创建数、更新数、以及新建 Leg 的 ID 列表
+   * 批量保存/更新 Legs (性能优化版：内存映射减少数据库 IO)
    */
   private static async saveLegsBatch(
     legs: any[],
     userId: number
   ): Promise<{ created: number; updated: number; newLegIds: number[] }> {
-    if (legs.length === 0) {
-      console.log('没有持仓需要保存');
-      return { created: 0, updated: 0, newLegIds: [] };
-    }
+    if (legs.length === 0) return { created: 0, updated: 0, newLegIds: [] };
 
-    let created = 0;
-    let updated = 0;
+    let createdCount = 0;
+    let updatedCount = 0;
     const newLegIds: number[] = [];
 
-    // 使用事务批量处理
-    await prisma.$transaction(async (tx) => {
-      for (const leg of legs) {
-        // 尝试查找已存在的 Leg（symbol + openDate + side 三者联合唯一，双向持仓不会冲突）
-        const existingLeg = await tx.leg.findFirst({
-          where: {
-            userId,
-            symbol:   leg.symbol,
-            openDate: leg.openDate,
-            side:     leg.side.toUpperCase() as any,
-          },
-        });
-
-        const legData = {
-          closeDate: leg.closeDate,
-          closePrice: leg.averageExit,
-          status: leg.status.toUpperCase() as any,
-          currentAmount: leg.status === 'closed' ? 0 : Math.abs(leg.currentSize || 0),
-          closeAmount: leg.status === 'closed' ? (leg.openSize || Math.abs(leg.currentSize || 0)) : undefined,
-          averageExit: leg.averageExit,
-          realisedPnL: leg.realisedPnL || 0,
-          realisedPnLusd: leg.realisedPnLusd || 0,
-          netPnL: (leg.realisedPnLusd || 0) - (leg.commission || 0),
-          commission: leg.commission || 0,
-          commissionUsd: leg.commission || 0,
-          duration: leg.duration,
-        };
-
-        if (existingLeg) {
-          await tx.leg.update({
-            where: { id: existingLeg.id },
-            data: legData,
-          });
-          updated++;
-        } else {
-          const created_ = await tx.leg.create({
-            data: {
-              userId,
-              symbol: leg.symbol,
-              baseAsset: leg.baseAsset || leg.symbol.match(/^([A-Z]+)(USDT|BTC|ETH|USD|BUSD)$/)?.[1] || leg.symbol,
-              quoteAsset: leg.quoteAsset || leg.symbol.match(/^([A-Z]+)(USDT|BTC|ETH|USD|BUSD)$/)?.[2] || 'USDT',
-              side: leg.side.toUpperCase() as any,
-              openDate: leg.openDate,
-              openPrice: leg.averageEntry || 0,
-              openAmount: leg.openSize || Math.abs(leg.currentSize || 0),
-              averageEntry: leg.averageEntry || 0,
-              sizeUsd: leg.sizeUsd || 0,
-              peakSizeUsd: leg.maxSizeUsd || leg.sizeUsd || 0,
-              ...legData,
-            },
-            select: { id: true },
-          });
-          newLegIds.push(created_.id);
-          created++;
-        }
+    // 1. 一次性获取该用户的所有相关交易对的现有 Leg，存入内存 Map
+    // 这种做法将 O(N) 次 DB 查询降为 O(1)
+    const existingLegs = await prisma.leg.findMany({
+      where: { userId },
+      select: { 
+        id: true, 
+        symbol: true, 
+        openDate: true, 
+        side: true, 
+        status: true 
       }
     });
 
-    console.log(`创建 ${created} 个持仓，更新 ${updated} 个持仓`);
-    return { created, updated, newLegIds };
+    // 创建唯一索引映射: symbol:openDate:side
+    const legMap = new Map<string, typeof existingLegs[0]>();
+    existingLegs.forEach(l => {
+      const key = `${l.symbol}:${l.openDate.getTime()}:${l.side}`;
+      legMap.set(key, l);
+    });
+
+    // 2. 分批处理事务，避免事务过大锁定表太久
+    const CHUNK_SIZE = 500;
+    for (let i = 0; i < legs.length; i += CHUNK_SIZE) {
+      const chunk = legs.slice(i, i + CHUNK_SIZE);
+      
+      await prisma.$transaction(async (tx) => {
+        for (const leg of chunk) {
+          const legKey = `${leg.symbol}:${leg.openDate.getTime()}:${leg.side.toUpperCase()}`;
+          const existingLeg = legMap.get(legKey);
+
+          const legData = {
+            closeDate: leg.closeDate,
+            closePrice: leg.averageExit,
+            status: leg.status.toUpperCase() as any,
+            currentAmount: leg.status === 'closed' ? 0 : Math.abs(leg.currentSize || 0),
+            closeAmount: leg.status === 'closed' ? (leg.openSize || Math.abs(leg.currentSize || 0)) : undefined,
+            averageExit: leg.averageExit,
+            realisedPnL: leg.realisedPnL || 0,
+            realisedPnLusd: leg.realisedPnLusd || 0,
+            netPnL: (leg.realisedPnLusd || 0) - (leg.commission || 0),
+            commission: leg.commission || 0,
+            commissionUsd: leg.commission || 0,
+            duration: leg.duration,
+          };
+
+          let currentLegId: number;
+
+          if (existingLeg) {
+            await tx.leg.update({
+              where: { id: existingLeg.id },
+              data: legData,
+            });
+            currentLegId = existingLeg.id;
+            updatedCount++;
+            // 状态变更记录（用于后续 MAE/MFE 计算触发）
+            if (existingLeg.status === 'OPEN' && legData.status === 'CLOSED') {
+              newLegIds.push(existingLeg.id);
+            }
+          } else {
+            const created = await tx.leg.create({
+              data: {
+                userId,
+                symbol: leg.symbol,
+                baseAsset: leg.baseAsset || leg.symbol.match(/^([A-Z]+)(USDT|BTC|ETH|USD|BUSD)$/)?.[1] || leg.symbol,
+                quoteAsset: leg.quoteAsset || leg.symbol.match(/^([A-Z]+)(USDT|BTC|ETH|USD|BUSD)$/)?.[2] || 'USDT',
+                side: leg.side.toUpperCase() as any,
+                openDate: leg.openDate,
+                openPrice: leg.averageEntry || 0,
+                openAmount: leg.openSize || Math.abs(leg.currentSize || 0),
+                averageEntry: leg.averageEntry || 0,
+                sizeUsd: leg.sizeUsd || 0,
+                peakSizeUsd: leg.maxSizeUsd || leg.sizeUsd || 0,
+                ...legData,
+              },
+              select: { id: true },
+            });
+            currentLegId = created.id;
+            newLegIds.push(created.id);
+            createdCount++;
+          }
+
+          // 关键修复：将底层 Trade 关联到这个 Leg 上
+          if (leg.trades && leg.trades.length > 0) {
+            const tradeIds = leg.trades.map((t: any) => t.id);
+            await tx.trade.updateMany({
+              where: { id: { in: tradeIds } },
+              data: { legId: currentLegId }
+            });
+          }
+        }
+      });
+    }
+
+    console.log(`持仓处理完成：创建 ${createdCount} 个，更新 ${updatedCount} 个`);
+    return { created: createdCount, updated: updatedCount, newLegIds };
   }
   
   /**
@@ -491,10 +667,6 @@ export class SyncService {
 
   /**
    * 分页获取用户交易记录
-   *
-   * Binance Futures API 限制：fetchMyTrades 每次最多返回 7 天窗口内的数据。
-   * 即使返回条数 < limit，也不代表结束——可能只是当前 7 天窗口内没有更多数据。
-   * 因此必须按时间窗口（7天）滑动，直到覆盖到当前时间。
    */
   private static async fetchMyTradesWithPagination(
     exchange: any,
@@ -517,12 +689,7 @@ export class SyncService {
       });
 
       if (!trades || trades.length === 0) {
-        // 当前窗口无交易，滑动到下一个窗口
-        if (symbol) {
-          // 只对有交易的 symbol 打印窗口跳过信息，避免日志过多
-        }
         startTime = windowEnd + 1;
-        // 避免请求过于频繁
         if (exchange.rateLimit) {
           await new Promise(resolve => setTimeout(resolve, exchange.rateLimit));
         }
@@ -531,25 +698,21 @@ export class SyncService {
 
       allTrades.push(...trades);
 
-      const lastTradeTimestamp = trades[trades.length - 1].timestamp;
-
       if (trades.length === limit) {
-        // 满页：窗口内可能还有更多数据，按时间戳推进（不跨窗口）
-        console.log(`  └─ ${symbol ?? 'global'} 第 ${page} 页满 ${limit} 条，推进时间戳至 ${new Date(lastTradeTimestamp + 1).toISOString()}`);
-        startTime = lastTradeTimestamp + 1;
+        const lastTimestamp = trades[trades.length - 1].timestamp;
+        const firstTimestamp = trades[0].timestamp;
+        if (lastTimestamp === firstTimestamp) {
+          startTime = lastTimestamp + 1;
+        } else {
+          startTime = lastTimestamp;
+        }
       } else {
-        // 未满页：当前窗口数据已全部获取，滑动到下一个窗口
         startTime = windowEnd + 1;
       }
 
-      // 避免请求过于频繁，触发限流
       if (exchange.rateLimit) {
         await new Promise(resolve => setTimeout(resolve, exchange.rateLimit));
       }
-    }
-
-    if (page > 1) {
-      console.log(`  └─ ${symbol ?? 'global'} 共请求 ${page} 次，获得 ${allTrades.length} 条`);
     }
 
     return allTrades;

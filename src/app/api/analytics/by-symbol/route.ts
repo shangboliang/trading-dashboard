@@ -1,15 +1,26 @@
+export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
+import { NextRequest } from 'next/server';
 
 /**
  * GET /api/analytics/by-symbol
  * 按交易对统计
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const url = new URL(request.url);
+    const searchParams = url.searchParams;
     const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const filter = {
+      userId,
+      startDate: searchParams.get('startDate') ? new Date(searchParams.get('startDate') as string) : undefined,
+      endDate: searchParams.get('endDate') ? new Date(searchParams.get('endDate') as string) : undefined,
+      symbol: searchParams.get('symbol') || undefined,
+      apiKeyId: searchParams.get('apiKeyId') ? parseInt(searchParams.get('apiKeyId') as string) : undefined,
+    };
     
-    const stats = await LegService.getStatsBySymbol(userId);
+    const stats = await LegService.getStatsBySymbol(filter);
     
     return NextResponse.json(stats);
   } catch (error) {

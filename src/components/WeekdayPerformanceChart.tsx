@@ -2,17 +2,22 @@
 
 import { useEffect, useState } from "react";
 import ReactECharts from "echarts-for-react";
-import { analyticsApi, type WeekdayStats } from "@/lib/api-client";
+import { analyticsApi, type WeekdayStats, type GlobalFilter } from "@/lib/api-client";
 import { Loader2 } from "lucide-react";
 
-export function WeekdayPerformanceChart() {
+interface WeekdayPerformanceChartProps {
+  filters?: GlobalFilter;
+}
+
+export function WeekdayPerformanceChart({ filters }: WeekdayPerformanceChartProps) {
   const [data, setData] = useState<WeekdayStats[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadData() {
+      setLoading(true);
       try {
-        const weekdayData = await analyticsApi.getWeekday();
+        const weekdayData = await analyticsApi.getWeekday(filters);
         setData(weekdayData);
       } catch (err) {
         console.error('Failed to load weekday stats:', err);
@@ -21,7 +26,7 @@ export function WeekdayPerformanceChart() {
       }
     }
     loadData();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (

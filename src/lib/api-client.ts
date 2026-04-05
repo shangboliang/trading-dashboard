@@ -80,6 +80,8 @@ export interface Leg {
   sizeUsd: number;
   commission: number;
   result?: 'win' | 'loss' | 'breakeven';
+  strategy?: string | null;
+  notes?: string | null;
   tags?: any[];
 }
 
@@ -93,6 +95,14 @@ export interface ApiAccount {
   lastSyncAt?: string;
   syncStatus: string;
   errorMessage?: string;
+  asynSyncCount?: number;
+  lastAsynSyncAt?: string;
+  asynSyncTasks?: {
+    downloadId: string;
+    status: string;
+    downloadUrl: string | null;
+    createdAt: string;
+  }[];
   createdAt: string;
 }
 
@@ -147,6 +157,8 @@ export const legsApi = {
   }) => apiGet<{ data: Leg[]; pagination: any }>('/legs', params),
   
   getById: (id: number) => apiGet<Leg>(`/legs/${id}`),
+
+  update: (id: number, data: { strategy?: string; notes?: string }) => apiPut(`/legs/${id}`, data),
 };
 
 // Accounts API
@@ -158,6 +170,20 @@ export const accountsApi = {
   update: (id: number, data: any) => apiPut(`/accounts/${id}`, data),
   delete: (id: number) => apiDelete(`/accounts/${id}`),
   sync: (apiKeyId: number) => apiPost('/sync', { apiKeyId }),
+  syncByCsv: (apiKeyId: number, file: File) => {
+    const formData = new FormData();
+    formData.append('apiKeyId', apiKeyId.toString());
+    formData.append('file', file);
+    return fetch('/api/sync/csv', {
+      method: 'POST',
+      body: formData,
+    }).then(handleResponse);
+  },
+  requestAsynSync: (apiKeyId: number) => apiPost('/sync/asyn-request', { apiKeyId }),
+  checkAsynSyncStatus: (apiKeyId: number, downloadId: string) => 
+    apiGet<{ status: string; url?: string }>('/sync/asyn-status', { apiKeyId, downloadId }),
+  getBalance: (apiKeyId?: number) => apiGet<{ balance: number }>('/accounts/balance', { apiKeyId }),
+  calculateMaeMfe: (apiKeyId: number) => apiPost('/sync/mae-mfe', { apiKeyId }),
 };
 
 export interface WeekdayStats {
@@ -190,14 +216,22 @@ export interface DailyPnL {
   count: number;
 }
 
+export interface GlobalFilter {
+  startDate?: string;
+  endDate?: string;
+  symbol?: string;
+  apiKeyId?: number;
+}
+
 // Analytics API
 export const analyticsApi = {
-  getSummary: () => apiGet<SummaryStats>('/analytics/summary'),
-  getPnLCurve: (days?: number) => apiGet<PnLPoint[]>('/analytics/pnl-curve', { days }),
-  getBySymbol: () => apiGet<SymbolStats[]>('/analytics/by-symbol'),
-  getWeekday: () => apiGet<WeekdayStats[]>('/analytics/weekday'),
-  getHourly: () => apiGet<HourlyStats[]>('/analytics/hourly'),
-  getDuration: () => apiGet<DurationStats[]>('/analytics/duration'),
-  getSize: () => apiGet<SizeStats[]>('/analytics/size'),
-  getDaily: (year?: number, month?: number) => apiGet<DailyPnL[]>('/analytics/daily', { year, month }),
+  getSummary: (filters?: GlobalFilter) => apiGet<SummaryStats>('/analytics/summary', filters),
+  getPnLCurve: (filters?: GlobalFilter & { days?: number }) => apiGet<PnLPoint[]>('/analytics/pnl-curve', filters),
+  getBySymbol: (filters?: GlobalFilter) => apiGet<SymbolStats[]>('/analytics/by-symbol', filters),
+  getWeekday: (filters?: GlobalFilter) => apiGet<WeekdayStats[]>('/analytics/weekday', filters),
+  getHourly: (filters?: GlobalFilter) => apiGet<HourlyStats[]>('/analytics/hourly', filters),
+  getDuration: (filters?: GlobalFilter) => apiGet<DurationStats[]>('/analytics/duration', filters),
+  getSize: (filters?: GlobalFilter) => apiGet<SizeStats[]>('/analytics/size', filters),
+  getDaily: (year?: number, month?: number, filters?: GlobalFilter) => 
+    apiGet<DailyPnL[]>('/analytics/daily', { year, month, ...filters }),
 };

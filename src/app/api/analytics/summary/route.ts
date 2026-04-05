@@ -1,16 +1,28 @@
-import { NextResponse } from 'next/server';
+export const dynamic = 'force-dynamic';
+import { NextRequest, NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
 
 /**
  * GET /api/analytics/summary
  * 获取交易统计摘要
  */
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const url = new URL(request.url);
+    const searchParams = url.searchParams;
     const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const apiKeyIdParam = searchParams.get('apiKeyId');
+    const apiKeyId = apiKeyIdParam ? parseInt(apiKeyIdParam) : undefined;
+    const filter = {
+      userId,
+      startDate: searchParams.get('startDate') ? new Date(searchParams.get('startDate') as string) : undefined,
+      endDate: searchParams.get('endDate') ? new Date(searchParams.get('endDate') as string) : undefined,
+      symbol: searchParams.get('symbol') || undefined,
+      apiKeyId,
+    };
     
     // 获取统计数据
-    const stats = await LegService.getStats(userId);
+    const stats = await LegService.getStats(filter);
     
     // 格式化响应
     return NextResponse.json({

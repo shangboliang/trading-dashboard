@@ -6,7 +6,7 @@ import { zhCN } from "date-fns/locale";
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Loader2 } from "lucide-react";
 import { analyticsApi, type DailyPnL } from "@/lib/api-client";
 
-export function ProfitCalendar() {
+export function ProfitCalendar({ filters }: { filters?: any }) {
   const [currentMonth, setCurrentMonth] = useState(new Date());
   const [dailyData, setDailyData] = useState<DailyPnL[]>([]);
   const [loading, setLoading] = useState(true);
@@ -15,7 +15,7 @@ export function ProfitCalendar() {
     async function loadData() {
       try {
         setLoading(true);
-        const data = await analyticsApi.getDaily();
+        const data = await analyticsApi.getDaily(undefined, undefined, filters);
         setDailyData(data);
       } catch (err) {
         console.error('Failed to load daily PnL:', err);
@@ -24,7 +24,7 @@ export function ProfitCalendar() {
       }
     }
     loadData();
-  }, []);
+  }, [filters]);
 
   const days = eachDayOfInterval({
     start: startOfWeek(startOfMonth(currentMonth)),

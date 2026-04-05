@@ -1,3 +1,4 @@
+export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
 import type { LegStatus, LegSide } from '@prisma/client';

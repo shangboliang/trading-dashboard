@@ -2,17 +2,22 @@
 
 import { useEffect, useState } from "react";
 import ReactECharts from "echarts-for-react";
-import { analyticsApi, type HourlyStats } from "@/lib/api-client";
+import { analyticsApi, type HourlyStats, type GlobalFilter } from "@/lib/api-client";
 import { Loader2 } from "lucide-react";
 
-export function HourlyPerformanceChart() {
+interface HourlyPerformanceChartProps {
+  filters?: GlobalFilter;
+}
+
+export function HourlyPerformanceChart({ filters }: HourlyPerformanceChartProps) {
   const [data, setData] = useState<HourlyStats[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadData() {
+      setLoading(true);
       try {
-        const hourlyData = await analyticsApi.getHourly();
+        const hourlyData = await analyticsApi.getHourly(filters);
         setData(hourlyData);
       } catch (err) {
         console.error('Failed to load hourly stats:', err);
@@ -21,7 +26,7 @@ export function HourlyPerformanceChart() {
       }
     }
     loadData();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (

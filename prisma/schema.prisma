@@ -129,9 +129,15 @@ model ApiKey {
   /// 若同步失败，存储具体的报错信息以便向用户展示
   errorMessage String?    @db.Text
   
+  /// 本月已使用的异步同步次数 (1年历史拉取)
+  asynSyncCount  Int        @default(0)
+  /// 上次使用异步同步的时间（用于重置计数器）
+  lastAsynSyncAt DateTime?
+  
   trades       Trade[]
   syncLogs     SyncLog[]
   fundingFees  FundingFee[]
+  asynSyncTasks AsyncSyncTask[]
   
   /// 绑定时间
   createdAt    DateTime  @default(now())
@@ -141,6 +147,26 @@ model ApiKey {
   @@index([userId])
   @@index([exchange])
   @@index([isVerified])
+}
+
+/// 异步同步任务表：记录每一笔币安深度同步请求的历史
+model AsyncSyncTask {
+  id            Int       @id @default(autoincrement())
+  apiKeyId      Int
+  apiKey        ApiKey    @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  
+  /// 币安返回的下载 ID
+  downloadId    String    @unique
+  /// 状态：processing, completed, expired 等
+  status        String
+  /// 生成的下载链接
+  downloadUrl   String?   @db.Text
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([apiKeyId])
+  @@index([downloadId])
 }
 
 enum Exchange {

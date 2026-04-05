@@ -2,17 +2,22 @@
 
 import { useEffect, useState } from "react";
 import ReactECharts from "echarts-for-react";
-import { analyticsApi, type DurationStats } from "@/lib/api-client";
+import { analyticsApi, type DurationStats, type GlobalFilter } from "@/lib/api-client";
 import { Loader2 } from "lucide-react";
 
-export function TradeDurationChart() {
+interface TradeDurationChartProps {
+  filters?: GlobalFilter;
+}
+
+export function TradeDurationChart({ filters }: TradeDurationChartProps) {
   const [data, setData] = useState<DurationStats[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadData() {
+      setLoading(true);
       try {
-        const durationData = await analyticsApi.getDuration();
+        const durationData = await analyticsApi.getDuration(filters);
         setData(durationData);
       } catch (err) {
         console.error('Failed to load duration stats:', err);
@@ -21,7 +26,7 @@ export function TradeDurationChart() {
       }
     }
     loadData();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (

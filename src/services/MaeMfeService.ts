@@ -73,21 +73,49 @@ export class MaeMfeService {
 
   // ─────────────────────────────────────────────────────────────────────────
 
-  private static async calculateForLeg(exchange: any, leg: LegRow): Promise<void> {
+private static async calculateForLeg(exchange: any, leg: LegRow): Promise<void> {
     if (!leg.closeDate || leg.averageExit == null) return;
 
     // 数据库 symbol (BTCUSDT) → CCXT symbol (BTC/USDT:USDT)
     const ccxtSymbol = `${leg.baseAsset}/${leg.quoteAsset}:${leg.quoteAsset}`;
 
+    // 1. 动态决定 Timeframe 和单根 K 线的毫秒数
+    const durationMs = leg.closeDate.getTime() - leg.openDate.getTime();
+    let timeframe = '1h';
+    let candleMs = 60 * 60 * 1000;
+
+    if (durationMs <= 2 * 60 * 60 * 1000) {
+      // 持仓小于 2 小时，用 1 分钟线
+      timeframe = '1m';
+      candleMs = 60 * 1000;
+    } else if (durationMs <= 12 * 60 * 60 * 1000) {
+      // 持仓小于 12 小时，用 5 分钟线
+      timeframe = '5m';
+      candleMs = 5 * 60 * 1000;
+    } else if (durationMs <= 3 * 24 * 60 * 60 * 1000) {
+      // 持仓小于 3 天，用 15 分钟线
+      timeframe = '15m';
+      candleMs = 15 * 60 * 1000;
+    } 
+    // 更长的持仓默认使用 1h
+
+    // 2. 时间戳抹零对齐，防止短线数据被交易所整点过滤机制漏掉
+    // 向下取整：确保能拉取到开仓所在的这根 K 线
+    const since = Math.floor(leg.openDate.getTime() / candleMs) * candleMs;
+    // 向上取整加宽界限：确保包含平仓时的波动
+    const until = Math.ceil(leg.closeDate.getTime() / candleMs) * candleMs + candleMs;
+
     const candles = await this.fetchOHLCV(
       exchange,
       ccxtSymbol,
-      leg.openDate.getTime(),
-      leg.closeDate.getTime()
+      timeframe,
+      candleMs,
+      since,
+      until
     );
 
     if (candles.length === 0) {
-      console.warn(`[MAE/MFE] ${leg.symbol} Leg ${leg.id} 无 K 线数据，跳过`);
+      console.warn(`[MAE/MFE] ${leg.symbol} Leg ${leg.id} 无 K 线数据，跳过 (Timeframe: ${timeframe})`);
       return;
     }
 
@@ -99,9 +127,8 @@ export class MaeMfeService {
     const exit    = leg.averageExit;
     const isLong  = leg.side === 'LONG';
 
-    //                  LONG                     SHORT
-    // MAE (逆向): entry 以下最低点距离   vs   entry 以上最高点距离
-    // MFE (顺向): entry 以上最高点距离   vs   entry 以下最低点距离
+    // MAE (逆向): entry 以下最低点距离 vs entry 以上最高点距离
+    // MFE (顺向): entry 以上最高点距离 vs entry 以下最低点距离
     const mae = isLong
       ? Math.max(0, entry - minLow)
       : Math.max(0, maxHigh - entry);
@@ -130,27 +157,38 @@ export class MaeMfeService {
   }
 
   /**
-   * 带分页的 OHLCV 拉取（Binance 每次最多 1500 根）
-   * 使用 1h 时间框架，在精度和 API 调用次数之间取得平衡。
+   * 带分页的 OHLCV 拉取 (防封禁智能优化版)
    */
   private static async fetchOHLCV(
     exchange: any,
     symbol: string,
+    timeframe: string,
+    candleMs: number,
     since: number,
     until: number
   ): Promise<number[][]> {
     const candles: number[][] = [];
     let startTime = since;
-    const limit      = 1500;
-    const timeframe  = '1h';
-    const CANDLE_MS  = 60 * 60 * 1000;
+
+    // 绝对上限设置为 1000，彻底避开 >1000 触发的权重 10 惩罚
+    const MAX_LIMIT = 1000;
 
     while (startTime < until) {
+      // 1. 精确计算本次实际需要的 K 线数量，绝不多拉
+      const requiredCandles = Math.ceil((until - startTime) / candleMs);
+      let currentLimit = Math.min(MAX_LIMIT, requiredCandles);
+
+      // 2. 智能降级（权重极客优化）
+      // 避免刚刚越过界限触发高权重惩罚，比如需要 505 根时截断为 499 (权重由 5 降为 2)
+      if (currentLimit >= 500 && currentLimit < 750) {
+        currentLimit = 499;
+      }
+
       const batch: number[][] = await exchange.fetchOHLCV(
         symbol,
         timeframe,
         startTime,
-        limit,
+        currentLimit,
         { endTime: until }
       );
 
@@ -160,14 +198,31 @@ export class MaeMfeService {
 
       const lastTs = batch[batch.length - 1][0];
 
-      if (batch.length < limit) break;
+      // 如果拉出来的数据不到期望的数量，说明数据已经到头了
+      if (batch.length < currentLimit) break;
 
       // 满页：推进到下一根 K 线起点
-      startTime = lastTs + CANDLE_MS;
+      startTime = lastTs + candleMs;
 
-      if (exchange.rateLimit) {
-        await new Promise(r => setTimeout(r, exchange.rateLimit));
+      // 防止异常数据导致的死循环
+      if (startTime <= lastTs) {
+        startTime = lastTs + 1;
       }
+
+      // 3. 动态权重休眠保护
+      // 计算本次请求消耗的 Binance 权重
+      let weightConsumed = 1;
+      if (currentLimit >= 500) {
+        weightConsumed = 5;
+      } else if (currentLimit >= 100) {
+        weightConsumed = 2; 
+      }
+
+      // 让大权重请求后强制多休息一会儿，保护服务器 IP 不被拉黑
+      const baseRateLimit = exchange.rateLimit || 100;
+      const sleepMs = Math.max(baseRateLimit, weightConsumed * 50); 
+      
+      await new Promise(r => setTimeout(r, sleepMs));
     }
 
     return candles;

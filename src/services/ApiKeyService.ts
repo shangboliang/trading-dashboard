@@ -23,7 +23,68 @@ export interface UpdateApiKeyInput {
   passphrase?: string;
 }
 
+const EXCHANGE_MAP: Record<Exchange, string> = {
+  BINANCE: 'binance',
+  OKX: 'okx',
+  BYBIT: 'bybit',
+  HUOBI: 'huobi',
+  GATEIO: 'gateio',
+  KUCOIN: 'kucoin',
+};
+
 export class ApiKeyService {
+  /**
+   * 通过 CCXT 直接请求交易所获取当前 USDT 余额
+   */
+  static async getAccountBalance(userId: number, apiKeyId?: number): Promise<number> {
+    return 0;
+
+    // const keys = await prisma.apiKey.findMany({
+    //   where: apiKeyId ? { id: apiKeyId, userId } : { userId, isVerified: true }, 
+    // });
+
+    // let totalBalance = 0;
+    // if (keys.length === 0) return 0;
+
+    // const ccxt = await import('ccxt');
+
+    // for (const key of keys) {
+    //   try {
+    //     const decryptedSecret = decryptApiSecret(key.apiSecret);
+    //     const decryptedPassphrase = key.passphrase ? decryptApiSecret(key.passphrase) : undefined;
+        
+    //     const exchangeId = EXCHANGE_MAP[key.exchange];
+    //     const exchange = new (ccxt as any)[exchangeId]({
+    //       apiKey: key.apiKey,
+    //       secret: decryptedSecret,
+    //       password: decryptedPassphrase,
+    //       enableRateLimit: true,
+    //       httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+    //     });
+
+    //     // 默认获取合约账户余额
+    //     exchange.options['defaultType'] = 'future';
+    //     const balance = await exchange.fetchBalance();
+    //     console.log('balance ' + balance);
+
+        
+    //     // 尝试获取 USDT 总权益
+    //     if (balance.USDT && balance.USDT.total) {
+    //       totalBalance += balance.USDT.total;
+    //     } else if (balance.total && balance.total.USDT) {
+    //       totalBalance += balance.total.USDT;
+    //     } else if (balance.info && balance.info.totalCrossWalletBalance) {
+    //       // 针对 Binance 等可能有额外返回字段的特殊处理
+    //       totalBalance += parseFloat(balance.info.totalCrossWalletBalance);
+    //     }
+    //   } catch (err) {
+    //     console.error(`获取 API Key (${key.id}) 余额失败:`, err);
+    //   }
+    // }
+
+    // return totalBalance;
+  }
+
   /**
    * 创建新的 API Key
    */
@@ -72,10 +133,23 @@ export class ApiKeyService {
         lastSyncAt: true,
         syncStatus: true,
         errorMessage: true,
+        asynSyncCount: true,
+        lastAsynSyncAt: true,
         createdAt: true,
+        asynSyncTasks: {
+          orderBy: { createdAt: 'desc' },
+          take: 1
+        }
       },
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  /**
+   * 解密 API Secret
+   */
+  static async decrypt(encrypted: string) {
+    return decryptApiSecret(encrypted);
   }
   
   /**

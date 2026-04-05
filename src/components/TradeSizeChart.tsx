@@ -2,17 +2,22 @@
 
 import { useEffect, useState } from "react";
 import ReactECharts from "echarts-for-react";
-import { analyticsApi, type SizeStats } from "@/lib/api-client";
+import { analyticsApi, type SizeStats, type GlobalFilter } from "@/lib/api-client";
 import { Loader2 } from "lucide-react";
 
-export function TradeSizeChart() {
+interface TradeSizeChartProps {
+  filters?: GlobalFilter;
+}
+
+export function TradeSizeChart({ filters }: TradeSizeChartProps) {
   const [data, setData] = useState<SizeStats[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function loadData() {
+      setLoading(true);
       try {
-        const sizeData = await analyticsApi.getSize();
+        const sizeData = await analyticsApi.getSize(filters);
         setData(sizeData);
       } catch (err) {
         console.error('Failed to load size stats:', err);
@@ -21,7 +26,7 @@ export function TradeSizeChart() {
       }
     }
     loadData();
-  }, []);
+  }, [filters]);
 
   if (loading) {
     return (
