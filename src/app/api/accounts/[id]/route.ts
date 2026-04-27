@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { ApiKeyService } from '@/services/ApiKeyService';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 /**
  * GET /api/accounts/[id]
@@ -11,7 +12,8 @@ export async function GET(
   { params }: { params: { id: string } }
 ) {
   try {
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const apiKeyId = parseInt(params.id);
     
     const account = await ApiKeyService.getApiKeyById(apiKeyId, userId);
@@ -21,6 +23,7 @@ export async function GET(
     
     return NextResponse.json(safeAccount);
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to fetch account:', error);
     return NextResponse.json(
       { error: '获取账户详情失败' },
@@ -38,7 +41,8 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const apiKeyId = parseInt(params.id);
     const body = await request.json();
     
@@ -53,6 +57,7 @@ export async function PUT(
     
     return NextResponse.json({ success: true });
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to update account:', error);
     return NextResponse.json(
       { error: '更新账户失败' },
@@ -70,13 +75,15 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const apiKeyId = parseInt(params.id);
     
     await ApiKeyService.deleteApiKey(apiKeyId, userId);
     
     return NextResponse.json({ success: true });
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to delete account:', error);
     return NextResponse.json(
       { error: '删除账户失败' },

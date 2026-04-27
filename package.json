@@ -7,8 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "db:setup": "prisma db push --accept-data-loss",
-    "db:reset": "prisma migrate reset --force --skip-seed",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:danger:push-lossy": "tsx scripts/confirm-db-danger.ts push-lossy",
+    "db:danger:reset": "tsx scripts/confirm-db-danger.ts reset",
     "test:sync": "tsx scripts/test-sync.ts"
   },
   "dependencies": {

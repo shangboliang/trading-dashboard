@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 /**
  * GET /api/analytics/pnl-curve
@@ -13,7 +14,8 @@ export async function GET(request: NextRequest) {
   try {
     const url = new URL(request.url);
     const searchParams = url.searchParams;
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const filter = {
       userId,
       startDate: searchParams.get('startDate') ? new Date(searchParams.get('startDate') as string) : undefined,
@@ -27,6 +29,7 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json(curveData);
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to fetch PnL curve:', error);
     return NextResponse.json(
       { error: '获取盈亏曲线失败' },

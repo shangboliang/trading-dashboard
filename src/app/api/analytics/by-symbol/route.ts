@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
 import { NextRequest } from 'next/server';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 /**
  * GET /api/analytics/by-symbol
@@ -11,7 +12,8 @@ export async function GET(request: NextRequest) {
   try {
     const url = new URL(request.url);
     const searchParams = url.searchParams;
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const filter = {
       userId,
       startDate: searchParams.get('startDate') ? new Date(searchParams.get('startDate') as string) : undefined,
@@ -24,6 +26,7 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json(stats);
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to fetch symbol stats:', error);
     return NextResponse.json(
       { error: '获取交易对统计失败' },

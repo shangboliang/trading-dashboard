@@ -5,7 +5,9 @@
       "Bash(npx tsc:*)",
       "Bash(npm list:*)",
       "Bash(npm install:*)",
-      "Bash(reg query:*)"
+      "Bash(reg query:*)",
+      "Bash(\"D:\\\\code\\\\trading-dashboard\\\\src\\\\services\\\\FundingFeeService.ts\")",
+      "Bash(\"D:\\\\code\\\\trading-dashboard\\\\src\\\\services\\\\MaeMfeService.ts\")"
     ]
   }
 }

@@ -62,6 +62,23 @@ export async function apiDelete<T>(path: string): Promise<T> {
   return handleResponse<T>(response);
 }
 
+export interface AuthUser {
+  id: number;
+  uuid: string;
+  email: string;
+  name: string | null;
+  role: string;
+}
+
+export const authApi = {
+  me: () => apiGet<{ user: AuthUser | null }>('/auth/me'),
+  login: (data: { email: string; password: string }) =>
+    apiPost<{ user: AuthUser }>('/auth/login', data),
+  register: (data: { email: string; password: string; name?: string }) =>
+    apiPost<{ user: AuthUser }>('/auth/register', data),
+  logout: () => apiPost<{ ok: boolean }>('/auth/logout'),
+};
+
 // ==================== API 方法封装 ====================
 
 export interface Leg {

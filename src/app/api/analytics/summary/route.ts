@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 /**
  * GET /api/analytics/summary
@@ -10,7 +11,8 @@ export async function GET(request: NextRequest) {
   try {
     const url = new URL(request.url);
     const searchParams = url.searchParams;
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const apiKeyIdParam = searchParams.get('apiKeyId');
     const apiKeyId = apiKeyIdParam ? parseInt(apiKeyIdParam) : undefined;
     const filter = {
@@ -48,6 +50,7 @@ export async function GET(request: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to fetch summary:', error);
     return NextResponse.json(
       { error: '获取统计数据失败' },

@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { LegService } from '@/services/LegService';
 import type { LegStatus, LegSide } from '@prisma/client';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 /**
  * GET /api/legs
@@ -23,7 +24,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     
     // 开发环境使用默认用户 ID
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     
     // 解析查询参数
     const status = searchParams.get('status') as LegStatus | undefined;
@@ -60,6 +62,7 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json(result);
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to fetch legs:', error);
     return NextResponse.json(
       { error: '获取交易记录失败' },

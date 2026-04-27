@@ -129,7 +129,9 @@ enum SyncStatus {
 // ============================================
 
 model Trade {
-  id           String   @id // 交易所原始 ID
+  id           String   @id // 内部指纹主键（用于稳定去重）
+  tradeId      String?  // 交易所 Trade ID（可为空）
+  orderId      String?  // 交易所 Order ID（可为空）
   uuid         Uuid     @unique @default(uuid())
   
   apiKeyId     Int
@@ -167,10 +169,14 @@ model Trade {
   createdAt    DateTime @default(now())
   
   @@index([apiKeyId])
+  @@index([tradeId])
+  @@index([orderId])
+  @@index([apiKeyId, orderId])
   @@index([legId])
   @@index([symbol])
   @@index([timestamp])
   @@index([side])
+  @@unique([apiKeyId, tradeId])
 }
 
 enum TradeSide {

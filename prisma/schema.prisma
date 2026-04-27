@@ -39,6 +39,7 @@ model User {
   legs          Leg[]
   tags          Tag[]
   settings      UserSettings?
+  sessions      Session[]
   
   /// 账号注册时间
   createdAt     DateTime   @default(now())
@@ -61,6 +62,18 @@ enum Role {
   USER
   ADMIN
   PREMIUM
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  tokenHash String   @unique
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
 }
 
 /// 用户偏好配置表：存储用户的 UI 设置和全局偏好
@@ -191,8 +204,12 @@ enum SyncStatus {
 
 /// 原始成交表：直接从交易所接口拉取回来的不可变底稿数据
 model Trade {
-  /// 交易所返回的真实 Trade ID (作为主键去重)
+  /// 内部指纹主键：用于稳定去重（tradeId/orderId/关键字段组合）
   id           String     @id
+  /// 交易所 Trade ID（可选，不同来源可能缺失）
+  tradeId      String?
+  /// 交易所 Order ID（可选）
+  orderId      String?
   /// 内部系统生成的唯一标识
   uuid         String     @unique @default(cuid())
   
@@ -244,10 +261,14 @@ model Trade {
   createdAt    DateTime   @default(now())
   
   @@index([apiKeyId])
+  @@index([tradeId])
+  @@index([orderId])
+  @@index([apiKeyId, orderId])
   @@index([legId])
   @@index([symbol])
   @@index([timestamp])
   @@index([side])
+  @@unique([apiKeyId, tradeId])
 }
 
 enum TradeSide {

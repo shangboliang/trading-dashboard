@@ -5,6 +5,8 @@
 
 export interface RawTrade {
     id: string;
+    tradeId?: string | null;
+    orderId?: string | null;
     symbol: string;
     baseAsset?: string;
     quoteAsset?: string;

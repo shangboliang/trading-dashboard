@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { SyncService } from '@/services/SyncService';
 import { ApiKeyService } from '@/services/ApiKeyService';
 import prisma from '@/lib/prisma';
+import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@/lib/auth';
 
 export async function POST(request: NextRequest) {
   let apiKeyId: number | undefined;
@@ -16,6 +17,9 @@ export async function POST(request: NextRequest) {
     }
 
     // 竞态保护：检查当前同步状态
+    const user = await requireUser();
+    await requireApiKeyOwner(apiKeyId, user.id);
+
     const apiKeyDb = await prisma.apiKey.findUnique({
       where: { id: apiKeyId },
       select: { syncStatus: true }
@@ -46,6 +50,7 @@ export async function POST(request: NextRequest) {
       throw innerError;
     }
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('CSV Sync failed:', error);
     return NextResponse.json({ error: error instanceof Error ? error.message : '导入过程出错' }, { status: 500 });
   }

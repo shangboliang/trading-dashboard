@@ -1,6 +1,7 @@
 export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { SyncService } from '@/services/SyncService';
+import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@/lib/auth';
 
 /**
  * POST /api/sync
@@ -22,6 +23,9 @@ export async function POST(request: NextRequest) {
     }
     
     // 执行同步
+    const user = await requireUser();
+    await requireApiKeyOwner(Number(apiKeyId), user.id);
+
     const result = await SyncService.syncApiKey(apiKeyId);
     
     return NextResponse.json({
@@ -29,6 +33,7 @@ export async function POST(request: NextRequest) {
       ...result,
     });
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Sync failed:', error);
     const errorMessage = error instanceof Error ? error.message : '同步失败';
     return NextResponse.json(

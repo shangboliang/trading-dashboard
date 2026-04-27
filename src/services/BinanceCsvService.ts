@@ -1,11 +1,11 @@
-
 import { RawTrade } from '@/lib/trade-aggregator';
+import { buildTradeFingerprint, sanitizeTradeIdentifier } from '@/lib/trade-identity';
 
 export class BinanceCsvService {
   /**
    * 解析币安合约成交历史 CSV (支持多种表头格式)
    */
-  static parseTradeHistory(csvContent: string): RawTrade[] {
+  static parseTradeHistory(csvContent: string, apiKeyId: number): RawTrade[] {
     const lines = csvContent.trim().split('\n');
     if (lines.length < 2) return [];
 
@@ -27,12 +27,13 @@ export class BinanceCsvService {
     const feeIdx = headerMap.get('fee') ?? headerMap.get('commission') ?? -1;
     const feeAssetIdx = headerMap.get('fee asset') ?? headerMap.get('commission asset') ?? headerMap.get('asset') ?? -1;
     const tradeIdIdx = headerMap.get('trade id') ?? -1;
+    const orderIdIdx = headerMap.get('order id') ?? -1;
 
     if (timeIdx === -1 || symbolIdx === -1 || sideIdx === -1 || priceIdx === -1 || qtyIdx === -1) {
       throw new Error('CSV 缺少必要的列 (时间, 交易对, 方向, 价格, 数量)');
     }
 
-    return rows.map((row, index) => {
+    return rows.map((row) => {
       // 简单处理逗号分隔，假设没有带逗号的引号内容
       const cols = row.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
       
@@ -77,15 +78,26 @@ export class BinanceCsvService {
         feeUsd = (price * amount) * 0.00075;
       }
 
-      // 获取或生成 Trade ID
-      const tradeIdStr = tradeIdIdx !== -1 ? cols[tradeIdIdx] : '';
-      const id = tradeIdStr || `csv-${symbol}-${dateStr}-${index}`;
-
       // 确保日期字符串能够被正确解析为 UTC 时间
       const normalizedDateStr = dateStr.includes('Z') || dateStr.includes('+') ? dateStr : `${dateStr} Z`;
+      const timestamp = new Date(normalizedDateStr);
+      const tradeId = sanitizeTradeIdentifier(tradeIdIdx !== -1 ? cols[tradeIdIdx] : null);
+      const orderId = sanitizeTradeIdentifier(orderIdIdx !== -1 ? cols[orderIdIdx] : null);
+      const id = buildTradeFingerprint({
+        symbol,
+        timestamp,
+        side,
+        price,
+        amount,
+        tradeId,
+        orderId,
+        scopeKey: String(apiKeyId),
+      });
 
       return {
         id,
+        tradeId,
+        orderId,
         symbol,
         baseAsset,
         quoteAsset,
@@ -96,7 +108,7 @@ export class BinanceCsvService {
         fee,
         feeAsset,
         feeUsd,
-        timestamp: new Date(normalizedDateStr),
+        timestamp,
       };
     }).filter(t => t.symbol && !isNaN(t.timestamp.getTime()));
   }

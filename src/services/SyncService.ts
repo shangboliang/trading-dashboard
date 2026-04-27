@@ -10,6 +10,7 @@ import { MaeMfeService } from './MaeMfeService';
 import { aggregateTradesToLegs, RawTrade } from '@/lib/trade-aggregator';
 import type { Exchange } from '@prisma/client';
 import { BinanceCsvService } from './BinanceCsvService';
+import { buildTradeFingerprint, sanitizeTradeIdentifier } from '@/lib/trade-identity';
 
 // 不同交易所的 CCXT ID 映射
 const EXCHANGE_MAP: Record<Exchange, string> = {
@@ -29,6 +30,22 @@ export interface SyncResult {
 }
 
 export class SyncService {
+  private static makeOrderFingerprint(input: {
+    apiKeyId: number;
+    symbol: string;
+    timestamp: Date;
+    side: string;
+    price: number;
+    amount: number;
+    tradeId?: string | null;
+    orderId?: string | null;
+  }) {
+    return buildTradeFingerprint({
+      ...input,
+      scopeKey: String(input.apiKeyId),
+    });
+  }
+
   /**
    * 同步指定 API Key 的历史成交数据
    */
@@ -215,19 +232,40 @@ export class SyncService {
           feeUsd = notionalUsdt * 0.00075;
         }
 
+        const symbol = `${baseAsset}${quoteAsset.split(':')[0]}`;
+        const side = String(trade.side || '').toUpperCase();
+        const timestamp = new Date(trade.timestamp);
+        const tradeId = sanitizeTradeIdentifier(
+          trade.id ?? trade.info?.id ?? trade.info?.tradeId ?? trade.info?.trade_id
+        );
+        const orderId = sanitizeTradeIdentifier(
+          trade.order ?? trade.info?.orderId ?? trade.info?.order_id
+        );
+
         return {
-          id: trade.id?.toString() || `${trade.timestamp}-${trade.symbol}`,
-          symbol: `${baseAsset}${quoteAsset.split(':')[0]}`, // "BTCUSDT"
+          id: this.makeOrderFingerprint({
+            apiKeyId,
+            symbol,
+            timestamp,
+            side,
+            price: trade.price,
+            amount: trade.amount,
+            tradeId,
+            orderId,
+          }),
+          tradeId,
+          orderId,
+          symbol,
           baseAsset,
           quoteAsset: quoteAsset.split(':')[0],
-          side: trade.side,
+          side,
           positionSide,
           price: trade.price,
           amount: trade.amount,
           fee: rawFee,
           feeAsset: rawFeeAsset,
           feeUsd,
-          timestamp: new Date(trade.timestamp),
+          timestamp,
         };
       });
 
@@ -308,7 +346,7 @@ export class SyncService {
    */
   static async syncByCsv(apiKeyId: number, csvContent: string): Promise<SyncResult> {
     const userId = await this.getUserIdByApiKey(apiKeyId);
-    const trades = BinanceCsvService.parseTradeHistory(csvContent);
+    const trades = BinanceCsvService.parseTradeHistory(csvContent, apiKeyId);
     
     if (trades.length === 0) {
       throw new Error('CSV 文件解析为空或格式不匹配');
@@ -448,6 +486,20 @@ export class SyncService {
     const allDbTrades = await prisma.trade.findMany({
       where: { apiKeyId },
       orderBy: { timestamp: 'asc' },
+      select: {
+        id: true,
+        symbol: true,
+        baseAsset: true,
+        quoteAsset: true,
+        side: true,
+        positionSide: true,
+        price: true,
+        amount: true,
+        fee: true,
+        feeAsset: true,
+        feeUsd: true,
+        timestamp: true,
+      },
     });
 
     const tradesForAggregation: RawTrade[] = allDbTrades.map(t => ({
@@ -486,6 +538,8 @@ export class SyncService {
       const result = await prisma.trade.createMany({
         data: chunk.map(trade => ({
           id: trade.id,
+          tradeId: trade.tradeId ?? null,
+          orderId: trade.orderId ?? null,
           apiKeyId,
           symbol: trade.symbol,
           baseAsset: trade.baseAsset || '',

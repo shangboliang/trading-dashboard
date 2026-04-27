@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { ApiKeyService } from '@/services/ApiKeyService';
 import type { Exchange } from '@prisma/client';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 /**
  * GET /api/accounts
@@ -9,12 +10,14 @@ import type { Exchange } from '@prisma/client';
  */
 export async function GET() {
   try {
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     
     const accounts = await ApiKeyService.getUserApiKeys(userId);
     
     return NextResponse.json(accounts);
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to fetch accounts:', error);
     return NextResponse.json(
       { error: '获取账户列表失败' },
@@ -29,7 +32,8 @@ export async function GET() {
  */
 export async function POST(request: Request) {
   try {
-    const userId = parseInt(process.env.DEFAULT_USER_ID || '1');
+    const user = await requireUser();
+    const userId = user.id;
     const body = await request.json();
     
     const { name, exchange, apiKey, apiSecret, passphrase } = body;
@@ -63,6 +67,7 @@ export async function POST(request: Request) {
     
     return NextResponse.json(newAccount, { status: 201 });
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Failed to create account:', error);
     return NextResponse.json(
       { error: '创建账户失败' },

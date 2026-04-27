@@ -3,6 +3,7 @@ import { ApiKeyService } from '@/services/ApiKeyService';
 import { MaeMfeService } from '@/services/MaeMfeService';
 import prisma from '@/lib/prisma';
 import type { Exchange } from '@prisma/client';
+import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,6 +30,9 @@ export async function POST(request: NextRequest) {
     }
 
     // 1. 竞态保护：检查状态
+    const user = await requireUser();
+    await requireApiKeyOwner(Number(apiKeyId), user.id);
+
     const apiKeyDb = await prisma.apiKey.findUnique({
       where: { id: apiKeyId },
       select: { syncStatus: true, userId: true }
@@ -93,6 +97,7 @@ export async function POST(request: NextRequest) {
     }
 
   } catch (error) {
+    if (error instanceof AuthError) return authErrorResponse(error);
     console.error('MAE/MFE 手动触发失败:', error);
     return NextResponse.json(
       { error: error instanceof Error ? error.message : '计算请求失败' },

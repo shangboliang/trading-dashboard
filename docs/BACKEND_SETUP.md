@@ -1,141 +1,41 @@
-# 后端启动指南
+# 后端启动与数据库命令说明
 
-## 前置条件
+## 数据库命令
 
-1. **Node.js 18+** - [下载地址](https://nodejs.org/)
-2. **PostgreSQL 15+** - [下载地址](https://www.postgresql.org/download/)
-
-## 第一步：配置数据库
-
-### 1.1 创建 PostgreSQL 数据库
+日常开发优先使用安全命令：
 
 ```bash
-# 使用 psql 命令行工具
-psql -U postgres
-
-# 在 PostgreSQL 中执行
-CREATE DATABASE tradingdb;
-CREATE USER trader WITH PASSWORD 'yourpassword';
-GRANT ALL PRIVILEGES ON DATABASE tradingdb TO trader;
+npm run db:migrate
+npm run db:push
 ```
 
-### 1.2 配置 .env 文件
-
-复制环境变量文件：
+不要直接运行下面这些命令：
 
 ```bash
-cp .env.example .env
+prisma migrate reset
+prisma db push --accept-data-loss
+npm run db:reset
+npm run db:setup
 ```
 
-修改 `.env` 文件中的数据库连接字符串：
+原因：
 
-```env
-DATABASE_URL="postgresql://trader:yourpassword@localhost:5432/tradingdb?schema=public"
+- `prisma migrate reset` 会清空数据库并重建表。
+- `prisma db push --accept-data-loss` 允许 Prisma 为了同步结构而删除数据。
+- 旧的 `db:setup`、`db:reset` 命名不够明确，容易误操作。
 
-# 加密密钥 (生成 32 字节 hex 字符串)
-# Linux/Mac: openssl rand -hex 32
-# Windows: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-ENCRYPTION_KEY="change-this-to-a-random-32-byte-hex-key-in-production"
-
-# 默认用户 ID (开发环境使用)
-DEFAULT_USER_ID=1
-```
-
-## 第二步：安装依赖
+如果确实要执行会造成数据丢失的操作，只能使用带确认门禁的危险命令：
 
 ```bash
-npm install
+npm run db:danger:reset
+npm run db:danger:push-lossy
 ```
 
-## 第三步：初始化数据库
+执行时脚本会打印目标数据库和实际命令，并要求输入完整确认短语。确认短语不一致会直接中止。
 
-```bash
-# 生成 Prisma 客户端
-npx prisma generate
+## 命令含义
 
-# 创建数据库迁移
-npx prisma migrate dev --name init
-
-# (可选) 查看数据库内容
-npx prisma studio
-```
-
-## 第四步：启动开发服务器
-
-```bash
-npm run dev
-```
-
-访问 http://localhost:3000
-
----
-
-## 常见问题
-
-### Q: `DATABASE_URL` 格式说明
-
-```
-postgresql://用户名:密码@主机:端口/数据库名?schema=public
-```
-
-示例：
-- 本地开发：`postgresql://postgres:123456@localhost:5432/tradingdb`
-- Docker：`postgresql://postgres:postgres@db:5432/tradingdb`
-
-### Q: 如何生成 ENCRYPTION_KEY？
-
-```bash
-# Node.js
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-
-# OpenSSL
-openssl rand -hex 32
-```
-
-### Q: Prisma 迁移失败怎么办？
-
-```bash
-# 重置数据库迁移 (会删除所有数据！)
-npx prisma migrate reset
-
-# 或者手动删除 _MigrationHistory 表后重试
-```
-
-### Q: 如何添加测试数据？
-
-使用 Prisma Studio：
-
-```bash
-npx prisma studio
-```
-
-在图形界面中手动添加用户和 API Key。
-
----
-
-## API 端点列表
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | /api/accounts | 获取账户列表 |
-| POST | /api/accounts | 创建新账户 |
-| GET | /api/accounts/:id | 获取账户详情 |
-| PUT | /api/accounts/:id | 更新账户 |
-| DELETE | /api/accounts/:id | 删除账户 |
-| POST | /api/sync | 同步交易所数据 |
-| GET | /api/legs | 获取持仓列表 |
-| GET | /api/analytics/summary | 获取统计摘要 |
-| GET | /api/analytics/pnl-curve | 获取盈亏曲线 |
-| GET | /api/analytics/by-symbol | 按交易对统计 |
-
----
-
-## 下一步
-
-1. 访问 http://localhost:3000/accounts 添加交易所 API Key
-2. 点击同步按钮从交易所拉取历史数据
-3. 返回首页查看交易分析报告
-
----
-
-*最后更新：2026-03-31*
+- `npm run db:migrate`：正常开发迁移，推荐使用。
+- `npm run db:push`：普通结构同步，不带 `--accept-data-loss`。
+- `npm run db:danger:reset`：危险操作，删除所有数据并重建表。
+- `npm run db:danger:push-lossy`：危险操作，允许 Prisma 删除数据来同步结构。
