@@ -187,14 +187,25 @@ export const accountsApi = {
   update: (id: number, data: any) => apiPut(`/accounts/${id}`, data),
   delete: (id: number) => apiDelete(`/accounts/${id}`),
   sync: (apiKeyId: number) => apiPost('/sync', { apiKeyId }),
-  syncByCsv: (apiKeyId: number, file: File) => {
+  syncByCsv: (apiKeyId: number, file: File, headerMapping?: Record<string, string>) => {
     const formData = new FormData();
     formData.append('apiKeyId', apiKeyId.toString());
     formData.append('file', file);
+    if (headerMapping) {
+      formData.append('headerMapping', JSON.stringify(headerMapping));
+    }
     return fetch('/api/sync/csv', {
       method: 'POST',
       body: formData,
     }).then(handleResponse);
+  },
+  detectCsvHeaders: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return fetch('/api/sync/csv/headers', {
+      method: 'POST',
+      body: formData,
+    }).then(handleResponse) as Promise<{ headers: string[] }>;
   },
   requestAsynSync: (apiKeyId: number) => apiPost('/sync/asyn-request', { apiKeyId }),
   checkAsynSyncStatus: (apiKeyId: number, downloadId: string) => 

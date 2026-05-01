@@ -1,11 +1,34 @@
 import { RawTrade } from '@/lib/trade-aggregator';
 import { buildTradeFingerprint, sanitizeTradeIdentifier } from '@/lib/trade-identity';
 
+// 自定义表头映射配置
+export interface HeaderMapping {
+  time?: string;       // 时间列名
+  symbol?: string;     // 交易对列名
+  side?: string;       // 方向列名
+  positionSide?: string; // 仓位方向列名
+  price?: string;      // 价格列名
+  quantity?: string;   // 数量列名
+  fee?: string;        // 手续费列名
+  feeAsset?: string;   // 手续费币种列名
+  tradeId?: string;    // 成交ID列名
+  orderId?: string;    // 订单ID列名
+}
+
 export class BinanceCsvService {
   /**
-   * 解析币安合约成交历史 CSV (支持多种表头格式)
+   * 检测 CSV 文件的表头列名
    */
-  static parseTradeHistory(csvContent: string, apiKeyId: number): RawTrade[] {
+  static detectHeaders(csvContent: string): string[] {
+    const lines = csvContent.trim().split('\n');
+    if (lines.length === 0) return [];
+    return lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+  }
+
+  /**
+   * 解析币安合约成交历史 CSV (支持多种表头格式和自定义映射)
+   */
+  static parseTradeHistory(csvContent: string, apiKeyId: number, headerMapping?: HeaderMapping): RawTrade[] {
     const lines = csvContent.trim().split('\n');
     if (lines.length < 2) return [];
 
@@ -17,17 +40,37 @@ export class BinanceCsvService {
     const headerMap = new Map<string, number>();
     headers.forEach((h, i) => headerMap.set(h, i));
 
-    // 适配各种常见表头变体
-    const timeIdx = headerMap.get('time(utc)') ?? headerMap.get('date(utc)') ?? -1;
-    const symbolIdx = headerMap.get('symbol') ?? -1;
-    const sideIdx = headerMap.get('side') ?? -1;
-    const posSideIdx = headerMap.get('position side') ?? -1;
-    const priceIdx = headerMap.get('price') ?? -1;
-    const qtyIdx = headerMap.get('quantity') ?? headerMap.get('qty') ?? -1;
-    const feeIdx = headerMap.get('fee') ?? headerMap.get('commission') ?? -1;
-    const feeAssetIdx = headerMap.get('fee asset') ?? headerMap.get('commission asset') ?? headerMap.get('asset') ?? -1;
-    const tradeIdIdx = headerMap.get('trade id') ?? -1;
-    const orderIdIdx = headerMap.get('order id') ?? -1;
+    // 优先使用自定义映射，否则使用默认匹配
+    const timeIdx = headerMapping?.time 
+      ? (headerMap.get(headerMapping.time.toLowerCase()) ?? -1)
+      : (headerMap.get('time(utc)') ?? headerMap.get('date(utc)') ?? -1);
+    const symbolIdx = headerMapping?.symbol
+      ? (headerMap.get(headerMapping.symbol.toLowerCase()) ?? -1)
+      : (headerMap.get('symbol') ?? -1);
+    const sideIdx = headerMapping?.side
+      ? (headerMap.get(headerMapping.side.toLowerCase()) ?? -1)
+      : (headerMap.get('side') ?? -1);
+    const posSideIdx = headerMapping?.positionSide
+      ? (headerMap.get(headerMapping.positionSide.toLowerCase()) ?? -1)
+      : (headerMap.get('position side') ?? -1);
+    const priceIdx = headerMapping?.price
+      ? (headerMap.get(headerMapping.price.toLowerCase()) ?? -1)
+      : (headerMap.get('price') ?? -1);
+    const qtyIdx = headerMapping?.quantity
+      ? (headerMap.get(headerMapping.quantity.toLowerCase()) ?? -1)
+      : (headerMap.get('quantity') ?? headerMap.get('qty') ?? -1);
+    const feeIdx = headerMapping?.fee
+      ? (headerMap.get(headerMapping.fee.toLowerCase()) ?? -1)
+      : (headerMap.get('fee') ?? headerMap.get('commission') ?? -1);
+    const feeAssetIdx = headerMapping?.feeAsset
+      ? (headerMap.get(headerMapping.feeAsset.toLowerCase()) ?? -1)
+      : (headerMap.get('fee asset') ?? headerMap.get('commission asset') ?? headerMap.get('asset') ?? -1);
+    const tradeIdIdx = headerMapping?.tradeId
+      ? (headerMap.get(headerMapping.tradeId.toLowerCase()) ?? -1)
+      : (headerMap.get('trade id') ?? -1);
+    const orderIdIdx = headerMapping?.orderId
+      ? (headerMap.get(headerMapping.orderId.toLowerCase()) ?? -1)
+      : (headerMap.get('order id') ?? -1);
 
     if (timeIdx === -1 || symbolIdx === -1 || sideIdx === -1 || priceIdx === -1 || qtyIdx === -1) {
       throw new Error('CSV 缺少必要的列 (时间, 交易对, 方向, 价格, 数量)');

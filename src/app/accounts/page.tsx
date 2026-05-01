@@ -28,6 +28,24 @@ export default function AccountsPage() {
   const [asynDownloadUrl, setAsynDownloadUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // CSV 表头映射相关
+  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [headerMapping, setHeaderMapping] = useState<Record<string, string>>({});
+  const [isDetectingHeaders, setIsDetectingHeaders] = useState(false);
+
+  // 需要映射的字段定义
+  const MAPPING_FIELDS = [
+    { key: 'time', label: '时间', required: true, defaultNames: ['time(utc)'] },
+    { key: 'symbol', label: '交易对', required: true, defaultNames: ['symbol'] },
+    { key: 'side', label: '方向', required: true, defaultNames: ['side'] },
+    { key: 'positionSide', label: '仓位方向', required: false, defaultNames: ['position side'] },
+    { key: 'price', label: '价格', required: true, defaultNames: ['price'] },
+    { key: 'quantity', label: '数量', required: true, defaultNames: ['quantity'] },
+    { key: 'fee', label: '手续费', required: false, defaultNames: ['fee'] },
+    { key: 'tradeId', label: '成交ID', required: false, defaultNames: ['trade id'] },
+    { key: 'orderId', label: '订单ID', required: false, defaultNames: ['order id'] },
+  ];
+
   const [isAdding, setIsAdding] = useState(false);
   const [newAccount, setNewAccount] = useState({ 
     name: "", 
@@ -114,13 +132,44 @@ export default function AccountsPage() {
     setSyncModalAccount(null);
     try {
       const file = fileInputRef.current.files[0];
-      await accountsApi.syncByCsv(id, file);
+      await accountsApi.syncByCsv(id, file, headerMapping);
       alert('CSV 同步成功！');
       loadAccounts();
     } catch (err) {
       alert(err instanceof Error ? err.message : '同步失败');
     } finally {
       setSyncingId(null);
+      setCsvHeaders([]);
+      setHeaderMapping({});
+    }
+  };
+
+  // 检测 CSV 表头
+  const handleDetectHeaders = async () => {
+    const file = fileInputRef.current?.files?.[0];
+    if (!file) return;
+
+    setIsDetectingHeaders(true);
+    try {
+      const { headers } = await accountsApi.detectCsvHeaders(file);
+      setCsvHeaders(headers);
+
+      // 自动匹配常见表头
+      const autoMapping: Record<string, string> = {};
+      for (const field of MAPPING_FIELDS) {
+        const matchedHeader = headers.find(h => 
+          field.defaultNames.includes(h.toLowerCase())
+        );
+        if (matchedHeader) {
+          autoMapping[field.key] = matchedHeader;
+        }
+      }
+      setHeaderMapping(autoMapping);
+    } catch (err) {
+      console.error('检测表头失败:', err);
+      alert('检测表头失败，请检查文件格式');
+    } finally {
+      setIsDetectingHeaders(false);
     }
   };
 
@@ -317,11 +366,71 @@ export default function AccountsPage() {
                   <div className="font-bold text-white">上传成交历史 CSV</div>
                   <div className="text-sm text-textMuted mt-1">自行在交易所后台导出 CSV 文件并上传。支持所有历史记录，无时间限制。</div>
                   {syncMethod === 'csv' && (
-                    <div className="mt-3">
+                    <div className="mt-3 space-y-3">
+                      {/* 必填字段说明 */}
+                      <div className="bg-background/50 border border-border rounded-lg p-3 text-xs text-textMuted space-y-1">
+                        <div className="font-medium text-white mb-1.5">CSV 格式要求</div>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+                          <div><span className="text-blue-400">Time(UTC)</span> <span className="text-loss">*</span> 成交时间</div>
+                          <div><span className="text-blue-400">Symbol</span> <span className="text-loss">*</span> 交易对</div>
+                          <div><span className="text-blue-400">Side</span> <span className="text-loss">*</span> BUY/SELL</div>
+                          <div><span className="text-blue-400">Price</span> <span className="text-loss">*</span> 成交价格</div>
+                          <div><span className="text-blue-400">Quantity</span> <span className="text-loss">*</span> 成交数量</div>
+                          <div><span className="text-blue-400">Position Side</span> 多空方向</div>
+                          <div><span className="text-blue-400">Fee</span> 手续费</div>
+                          <div><span className="text-blue-400">Trade Id</span> 成交ID</div>
+                          <div><span className="text-blue-400">Order Id</span> 订单ID</div>
+                        </div>
+                        <div className="mt-1.5 text-[10px] text-textMuted/60">* 为必填字段，其他可跳过</div>
+                      </div>
+
                       <input 
                         type="file" accept=".csv" ref={fileInputRef}
+                        onChange={handleDetectHeaders}
                         className="text-xs text-textMuted file:mr-4 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-blue-600 file:text-white hover:file:bg-blue-500 cursor-pointer"
                       />
+
+                      {/* 表头映射 UI */}
+                      {isDetectingHeaders && (
+                        <div className="flex items-center gap-2 text-xs text-textMuted">
+                          <Loader2 size={12} className="animate-spin" /> 正在检测表头...
+                        </div>
+                      )}
+
+                      {csvHeaders.length > 0 && !isDetectingHeaders && (
+                        <div className="bg-background border border-border rounded-lg p-3 space-y-2">
+                          <div className="text-xs font-medium text-white mb-2">表头映射（自动匹配，可手动调整）</div>
+                          {MAPPING_FIELDS.map(field => (
+                            <div key={field.key} className="flex items-center gap-2">
+                              <label className="text-xs text-textMuted w-20 shrink-0">
+                                {field.label}
+                                {field.required && <span className="text-loss ml-0.5">*</span>}
+                              </label>
+                              <select
+                                value={headerMapping[field.key] || ''}
+                                onChange={e => {
+                                  const val = e.target.value;
+                                  setHeaderMapping(prev => {
+                                    const next = { ...prev };
+                                    if (val) {
+                                      next[field.key] = val;
+                                    } else {
+                                      delete next[field.key];
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                className="flex-1 bg-panel border border-border rounded px-2 py-1 text-xs text-white focus:outline-none focus:border-blue-500"
+                              >
+                                <option value="">-- 跳过 --</option>
+                                {csvHeaders.map(h => (
+                                  <option key={h} value={h}>{h}</option>
+                                ))}
+                              </select>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -403,6 +512,8 @@ export default function AccountsPage() {
                   setSyncModalAccount(null);
                   setAsynDownloadUrl(null);
                   setIsAsynProcessing(false);
+                  setCsvHeaders([]);
+                  setHeaderMapping({});
                 }} 
                 className="px-4 py-2 text-textMuted hover:text-white transition-colors text-sm"
               >

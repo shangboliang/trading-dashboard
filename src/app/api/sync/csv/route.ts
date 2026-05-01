@@ -4,6 +4,7 @@ import { SyncService } from '@/services/SyncService';
 import { ApiKeyService } from '@/services/ApiKeyService';
 import prisma from '@/lib/prisma';
 import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@/lib/auth';
+import { type HeaderMapping } from '@/services/BinanceCsvService';
 
 export async function POST(request: NextRequest) {
   let apiKeyId: number | undefined;
@@ -11,9 +12,20 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     apiKeyId = parseInt(formData.get('apiKeyId') as string);
     const file = formData.get('file') as File;
+    const mappingStr = formData.get('headerMapping') as string | null;
 
     if (!apiKeyId || !file) {
       return NextResponse.json({ error: 'apiKeyId 或 file 缺失' }, { status: 400 });
+    }
+
+    // 解析表头映射配置
+    let headerMapping: HeaderMapping | undefined;
+    if (mappingStr) {
+      try {
+        headerMapping = JSON.parse(mappingStr);
+      } catch {
+        return NextResponse.json({ error: 'headerMapping 格式无效' }, { status: 400 });
+      }
     }
 
     // 竞态保护：检查当前同步状态
@@ -38,7 +50,7 @@ export async function POST(request: NextRequest) {
 
     try {
       const csvContent = await file.text();
-      const result = await SyncService.syncByCsv(apiKeyId, csvContent);
+      const result = await SyncService.syncByCsv(apiKeyId, csvContent, headerMapping);
 
       // 解锁状态
       await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED');

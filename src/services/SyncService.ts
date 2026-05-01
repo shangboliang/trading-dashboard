@@ -9,7 +9,7 @@ import { FundingFeeService } from './FundingFeeService';
 import { MaeMfeService } from './MaeMfeService';
 import { aggregateTradesToLegs, RawTrade } from '@/lib/trade-aggregator';
 import type { Exchange } from '@prisma/client';
-import { BinanceCsvService } from './BinanceCsvService';
+import { BinanceCsvService, type HeaderMapping } from './BinanceCsvService';
 import { buildTradeFingerprint, sanitizeTradeIdentifier } from '@/lib/trade-identity';
 
 // 不同交易所的 CCXT ID 映射
@@ -344,9 +344,9 @@ export class SyncService {
   /**
    * 通过上传的 CSV 数据同步
    */
-  static async syncByCsv(apiKeyId: number, csvContent: string): Promise<SyncResult> {
+  static async syncByCsv(apiKeyId: number, csvContent: string, headerMapping?: HeaderMapping): Promise<SyncResult> {
     const userId = await this.getUserIdByApiKey(apiKeyId);
-    const trades = BinanceCsvService.parseTradeHistory(csvContent, apiKeyId);
+    const trades = BinanceCsvService.parseTradeHistory(csvContent, apiKeyId, headerMapping);
     
     if (trades.length === 0) {
       throw new Error('CSV 文件解析为空或格式不匹配');
