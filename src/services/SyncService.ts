@@ -65,11 +65,11 @@ export class SyncService {
 
     // 2. 状态放行并锁定
     // 更新状态为同步中
-    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING');
+    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING', undefined, apiKeyDb.userId);
 
     try {
       // 获取 API Key (包含解密的凭证)
-      const userId = await this.getUserIdByApiKey(apiKeyId);
+      const userId = apiKeyDb.userId;
       const apiKeyData = await ApiKeyService.getApiKeyById(apiKeyId, userId);
 
       // 使用 CCXT 连接交易所
@@ -283,7 +283,7 @@ export class SyncService {
       const result = await this.recalculateLegs(apiKeyId, userId);
 
       // 更新同步状态
-      await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED');
+      await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED', undefined, userId);
 
       // 记录同步日志
       await this.logSync(apiKeyId, {
@@ -328,7 +328,7 @@ export class SyncService {
       console.error('同步错误:', errorMessage);
 
       // 更新状态为失败
-      await ApiKeyService.updateSyncStatus(apiKeyId, 'FAILED', errorMessage);
+      await ApiKeyService.updateSyncStatus(apiKeyId, 'FAILED', errorMessage, apiKeyDb.userId);
 
       // 记录错误日志
       await this.logSync(apiKeyId, {
@@ -366,13 +366,13 @@ export class SyncService {
   /**
    * 申请异步 API 导出 (Binance)
    */
-  static async requestAsynSync(apiKeyId: number): Promise<{ downloadId: string; quotaRemaining: number }> {
-    const apiKeyDb = await prisma.apiKey.findUnique({
-      where: { id: apiKeyId },
+  static async requestAsynSync(apiKeyId: number, userId: number): Promise<{ downloadId: string; quotaRemaining: number }> {
+    const apiKeyDb = await prisma.apiKey.findFirst({
+      where: { id: apiKeyId, userId },
       include: { user: true }
     });
 
-    if (!apiKeyDb) throw new Error('API Key 不存在');
+    if (!apiKeyDb) throw new Error('API Key 不存在或无权访问');
     if (apiKeyDb.exchange !== 'BINANCE') throw new Error('异步同步目前仅支持币安');
 
     // 额度检查 (5次/月)
@@ -416,7 +416,7 @@ export class SyncService {
 
     // 1. 更新 ApiKey 表（仅更新额度和时间，不再锁定状态）
     await prisma.apiKey.update({
-      where: { id: apiKeyId },
+      where: { id: apiKeyId, userId },
       data: {
         asynSyncCount: apiRemaining !== undefined ? (5 - apiRemaining) : { increment: 1 },
         lastAsynSyncAt: now,
@@ -444,12 +444,12 @@ export class SyncService {
   /**
    * 轮询检查异步 API 状态
    */
-  static async checkAsynSyncStatus(apiKeyId: number, downloadId: string): Promise<{ status: string; url?: string }> {
-    const apiKeyDb = await prisma.apiKey.findUnique({
-      where: { id: apiKeyId }
+  static async checkAsynSyncStatus(apiKeyId: number, downloadId: string, userId: number): Promise<{ status: string; url?: string }> {
+    const apiKeyDb = await prisma.apiKey.findFirst({
+      where: { id: apiKeyId, userId }
     });
 
-    if (!apiKeyDb) throw new Error('API Key 不存在');
+    if (!apiKeyDb) throw new Error('API Key 不存在或无权访问');
 
     const ccxt = await import('ccxt');
     const exchange = new ccxt.binance({

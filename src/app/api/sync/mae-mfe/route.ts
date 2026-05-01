@@ -44,7 +44,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 2. 锁定状态
-    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING');
+    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING', undefined, user.id);
 
     try {
       // 3. 获取 API 凭证以初始化 CCXT
@@ -85,14 +85,14 @@ export async function POST(request: NextRequest) {
       }
 
       // 5. 释放状态
-      await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED');
+      await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED', undefined, user.id);
 
       return NextResponse.json({ message: `成功计算了 ${legIds.length} 个订单的 MAE/MFE` });
 
     } catch (innerError) {
       // 发生错误，释放状态并记录错误
       const errorMessage = innerError instanceof Error ? innerError.message : 'MAE/MFE 计算失败';
-      await ApiKeyService.updateSyncStatus(apiKeyId, 'FAILED', errorMessage);
+      await ApiKeyService.updateSyncStatus(apiKeyId, 'FAILED', errorMessage, user.id);
       throw innerError;
     }
 

@@ -46,19 +46,19 @@ export async function POST(request: NextRequest) {
     }
 
     // 锁定状态
-    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING');
+    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING', undefined, user.id);
 
     try {
       const csvContent = await file.text();
       const result = await SyncService.syncByCsv(apiKeyId, csvContent, headerMapping);
 
       // 解锁状态
-      await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED');
+      await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED', undefined, user.id);
 
       return NextResponse.json({ message: 'CSV 导入成功', ...result });
     } catch (innerError) {
       const errorMessage = innerError instanceof Error ? innerError.message : 'CSV 导入失败';
-      await ApiKeyService.updateSyncStatus(apiKeyId, 'FAILED', errorMessage);
+      await ApiKeyService.updateSyncStatus(apiKeyId, 'FAILED', errorMessage, user.id);
       throw innerError;
     }
   } catch (error) {

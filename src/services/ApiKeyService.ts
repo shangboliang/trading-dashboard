@@ -268,10 +268,11 @@ export class ApiKeyService {
   static async updateSyncStatus(
     apiKeyId: number,
     status: SyncStatus,
-    errorMessage?: string
+    errorMessage?: string,
+    userId?: number
   ) {
     return prisma.apiKey.update({
-      where: { id: apiKeyId },
+      where: userId ? { id: apiKeyId, userId } : { id: apiKeyId },
       data: {
         syncStatus: status,
         lastSyncAt: status === 'COMPLETED' ? new Date() : undefined,

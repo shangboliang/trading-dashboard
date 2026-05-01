@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     const user = await requireUser();
     await requireApiKeyOwner(apiKeyId, user.id);
 
-    const result = await SyncService.checkAsynSyncStatus(apiKeyId, downloadId);
+    const result = await SyncService.checkAsynSyncStatus(apiKeyId, downloadId, user.id);
 
     return NextResponse.json(result);
   } catch (error) {

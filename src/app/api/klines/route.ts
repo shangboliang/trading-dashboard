@@ -17,6 +17,7 @@ export const dynamic = 'force-dynamic';
 
 import { NextRequest, NextResponse } from 'next/server';
 import ccxt from 'ccxt';
+import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
 // 开发环境走本地代理
 const proxyUrl =
@@ -33,19 +34,22 @@ const binance = new ccxt.binance({
 });
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-
-  const symbol = searchParams.get('symbol');
-  const interval = searchParams.get('interval') || '1h';
-  const startTime = searchParams.get('startTime');
-  const endTime = searchParams.get('endTime');
-  const limit = searchParams.get('limit');
-
-  if (!symbol) {
-    return NextResponse.json({ error: 'symbol is required' }, { status: 400 });
-  }
-
   try {
+    // 验证用户已登录
+    await requireUser();
+
+    const { searchParams } = new URL(request.url);
+
+    const symbol = searchParams.get('symbol');
+    const interval = searchParams.get('interval') || '1h';
+    const startTime = searchParams.get('startTime');
+    const endTime = searchParams.get('endTime');
+    const limit = searchParams.get('limit');
+
+    if (!symbol) {
+      return NextResponse.json({ error: 'symbol is required' }, { status: 400 });
+    }
+
     // 使用 ccxt 的隐式调用直接请求 Binance API
     // fapiPublicGetKlines 对应 GET /fapi/v1/klines
     const params: any = {
@@ -60,6 +64,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json(data);
   } catch (err) {
+    if (err instanceof AuthError) return authErrorResponse(err);
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[/api/klines] 代理请求失败:', msg);
     return NextResponse.json({ error: msg }, { status: 502 });

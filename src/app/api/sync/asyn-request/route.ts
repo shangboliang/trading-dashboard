@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
     const user = await requireUser();
     await requireApiKeyOwner(Number(apiKeyId), user.id);
 
-    const result = await SyncService.requestAsynSync(apiKeyId);
+    const result = await SyncService.requestAsynSync(apiKeyId, user.id);
 
     return NextResponse.json({ message: '异步导出申请成功，请稍后检查状态', ...result });
   } catch (error) {
