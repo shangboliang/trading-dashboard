@@ -10,11 +10,15 @@ interface CardProps {
   children: ReactNode;
   className?: string;
   title?: string;
+  onClick?: () => void;
 }
 
-export function Card({ children, className, title }: CardProps) {
+export function Card({ children, className, title, onClick }: CardProps) {
   return (
-    <div className={cn("bg-panel border border-border rounded-lg p-5 shadow-sm", className)}>
+    <div
+      className={cn("bg-panel border border-border rounded-lg p-5 shadow-sm", onClick && "cursor-pointer", className)}
+      onClick={onClick}
+    >
       {title && <h3 className="text-textMuted text-sm font-medium mb-4 uppercase tracking-wider">{title}</h3>}
       {children}
     </div>

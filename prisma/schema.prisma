@@ -351,6 +351,8 @@ model Leg {
 
   /// 持仓期间累计产生的资金费（负=支付，正=收入），USD 计价
   fundingFeeUsd   Float     @default(0)
+  /// 上次资金费归集时间
+  fundingFeeUpdatedAt DateTime?
   
   /// 仓位初始的名义价值 (转换为 USD)
   sizeUsd         Float
@@ -538,6 +540,15 @@ model FundingFee {
   legId       Int?
   leg         Leg?     @relation(fields: [legId], references: [id], onDelete: SetNull)
 
+  /// Binance 流水号 (tranId)，用于去重
+  tranId      String?
+  /// 收入类型：FUNDING_FEE / COMMISSION / REALIZED_PNL 等
+  incomeType  String   @default("FUNDING_FEE")
+  /// 资产币种（如 USDT、BNB）
+  asset       String   @default("USDT")
+  /// 原始备注信息
+  info        String?
+
   /// 交易对（数据库格式，如 "BTCUSDT"）
   symbol      String
   /// 资金费金额（负数=支付，正数=收入；原始计价币种）
@@ -549,10 +560,11 @@ model FundingFee {
 
   createdAt   DateTime @default(now())
 
-  /// 防重：同一 apiKey + symbol + 时间点唯一
-  @@unique([apiKeyId, symbol, timestamp])
+  /// 防重：同一 apiKey + tranId + incomeType 唯一
+  @@unique([apiKeyId, tranId, incomeType])
   @@index([apiKeyId])
   @@index([legId])
   @@index([symbol])
   @@index([timestamp])
+  @@index([tranId])
 }

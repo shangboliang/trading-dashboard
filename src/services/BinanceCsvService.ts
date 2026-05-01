@@ -17,23 +17,27 @@ export interface HeaderMapping {
 
 export class BinanceCsvService {
   /**
-   * 检测 CSV 文件的表头列名
+   * 检测 CSV 文件的表头列名（支持逗号和 Tab 分隔）
    */
   static detectHeaders(csvContent: string): string[] {
     const lines = csvContent.trim().split('\n');
     if (lines.length === 0) return [];
-    return lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+    const separator = lines[0].includes('\t') ? '\t' : ',';
+    return lines[0].split(separator).map(h => h.trim().replace(/^"|"$/g, ''));
   }
 
   /**
-   * 解析币安合约成交历史 CSV (支持多种表头格式和自定义映射)
+   * 解析币安合约成交历史 CSV (支持多种表头格式和自定义映射，支持逗号和 Tab 分隔)
    */
   static parseTradeHistory(csvContent: string, apiKeyId: number, headerMapping?: HeaderMapping): RawTrade[] {
     const lines = csvContent.trim().split('\n');
     if (lines.length < 2) return [];
 
+    // 自动检测分隔符（Tab 或逗号）
+    const separator = lines[0].includes('\t') ? '\t' : ',';
+
     // 获取并格式化表头，转小写以防大小写不一致
-    const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
+    const headers = lines[0].split(separator).map(h => h.trim().replace(/^"|"$/g, '').toLowerCase());
     const rows = lines.slice(1);
     
     // 建立表头映射
@@ -78,7 +82,7 @@ export class BinanceCsvService {
 
     return rows.map((row) => {
       // 简单处理逗号分隔，假设没有带逗号的引号内容
-      const cols = row.split(',').map(c => c.trim().replace(/^"|"$/g, ''));
+      const cols = row.split(separator).map(c => c.trim().replace(/^"|"$/g, ''));
       
       const dateStr = cols[timeIdx];
       const symbol = cols[symbolIdx].toUpperCase();

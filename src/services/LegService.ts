@@ -166,6 +166,9 @@ export class LegService {
         trades: {
           orderBy: { timestamp: 'asc' },
         },
+        fundingFees: {
+          orderBy: { timestamp: 'asc' },
+        },
       },
     });
   }

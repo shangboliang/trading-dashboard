@@ -253,7 +253,7 @@ export default function Home() {
                       <th className="py-3 px-4 font-medium">符号</th>
                       <th className="py-3 px-4 font-medium text-right">价格 (入/出)</th>
                       <th className="py-3 px-4 font-medium text-right">持仓时间</th>
-                      <th className="py-3 px-4 font-medium text-right">已实现 PNL</th>
+                      <th className="py-3 px-4 font-medium text-right">净利润</th>
                       <th className="py-3 px-4 font-medium text-right">时间</th>
                     </tr>
                   </thead>
@@ -278,8 +278,8 @@ export default function Home() {
                         <td className="py-4 px-4 text-right text-textMuted text-xs">
                           {formatDuration(leg.duration)}
                         </td>
-                        <td className={`py-4 px-4 text-right font-bold font-mono ${leg.realisedPnLusd >= 0 ? 'text-win' : 'text-loss'}`}>
-                          {leg.realisedPnLusd >= 0 ? '+' : ''}${leg.realisedPnLusd.toFixed(2)}
+                        <td className={`py-4 px-4 text-right font-bold font-mono ${leg.netPnL >= 0 ? 'text-win' : 'text-loss'}`}>
+                          {leg.netPnL >= 0 ? '+' : ''}${leg.netPnL.toFixed(2)}
                         </td>
                         <td className="py-4 px-4 text-right text-textMuted text-xs">
                           {leg.closeDate ? format(new Date(leg.closeDate), 'yyyy-MM-dd HH:mm') : '-'}

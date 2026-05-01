@@ -96,6 +96,8 @@ export interface Leg {
   duration: number;
   sizeUsd: number;
   commission: number;
+  fundingFeeUsd?: number;
+  fundingFees?: FundingFeeRecord[];
   result?: 'win' | 'loss' | 'breakeven';
   strategy?: string | null;
   notes?: string | null;
@@ -212,6 +214,56 @@ export const accountsApi = {
     apiGet<{ status: string; url?: string }>('/sync/asyn-status', { apiKeyId, downloadId }),
   getBalance: (apiKeyId?: number) => apiGet<{ balance: number }>('/accounts/balance', { apiKeyId }),
   calculateMaeMfe: (apiKeyId: number) => apiPost('/sync/mae-mfe', { apiKeyId }),
+};
+
+// Funding Fee API
+export interface FundingFeeRecord {
+  id: number;
+  apiKeyId: number;
+  legId: number | null;
+  tranId: string | null;
+  incomeType: string;
+  asset: string;
+  symbol: string;
+  amount: number;
+  amountUsd: number;
+  info: string | null;
+  timestamp: string;
+  apiKey?: { name: string; exchange: string };
+  leg?: { id: number; symbol: string; side: string; status: string } | null;
+}
+
+export const fundingApi = {
+  getList: (params?: {
+    apiKeyId?: number;
+    symbol?: string;
+    startDate?: string;
+    endDate?: string;
+    page?: number;
+    pageSize?: number;
+  }) => apiGet<{ data: FundingFeeRecord[]; pagination: any }>('/funding', params),
+  syncByCsv: (apiKeyId: number, file: File, headerMapping?: Record<string, string>) => {
+    const formData = new FormData();
+    formData.append('apiKeyId', apiKeyId.toString());
+    formData.append('file', file);
+    if (headerMapping) {
+      formData.append('headerMapping', JSON.stringify(headerMapping));
+    }
+    return fetch('/api/funding', {
+      method: 'POST',
+      body: formData,
+    }).then(handleResponse);
+  },
+  detectCsvHeaders: (file: File) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return fetch('/api/funding/headers', {
+      method: 'POST',
+      body: formData,
+    }).then(handleResponse) as Promise<{ headers: string[] }>;
+  },
+  syncByApi: (apiKeyId: number) => apiPost('/funding/sync', { apiKeyId }),
+  associate: (apiKeyId: number) => apiPost('/funding/associate', { apiKeyId }) as Promise<{ message: string; associated: number; legsUpdated: number }>,
 };
 
 export interface WeekdayStats {

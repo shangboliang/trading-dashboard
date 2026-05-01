@@ -3,16 +3,371 @@
  *
  * 职责：
  *   1. 从交易所拉取合约持仓期间产生的历史资金费流水
- *   2. 写入 FundingFee 表（幂等，重复跳过）
- *   3. 将资金费按 (symbol + 时间区间) 归集到对应 Leg
- *   4. 更新 Leg.fundingFeeUsd 和 Leg.netPnL
+ *   2. 从 CSV 导入资金费记录
+ *   3. 写入 FundingFee 表（幂等，重复跳过）
+ *   4. 将资金费按 (symbol + 时间区间) 归集到对应 Leg
+ *   5. 更新 Leg.fundingFeeUsd 和 Leg.netPnL
  */
 
 import prisma from '@/lib/prisma';
+import { ApiKeyService } from './ApiKeyService';
+import { IncomeCsvService, type IncomeHeaderMapping, type RawIncomeRecord } from './IncomeCsvService';
 
 export class FundingFeeService {
   /**
-   * 同步资金费并完成归集，返回入库条数
+   * 通过 API 同步资金费（调用 Binance Income History API）
+   */
+  static async syncByApi(apiKeyId: number, userId: number): Promise<number> {
+    const apiKeyData = await ApiKeyService.getApiKeyById(apiKeyId, userId);
+
+    const ccxt = await import('ccxt');
+    const exchangeId = 'binance'; // 目前仅支持币安
+    const exchange = new (ccxt as any)[exchangeId]({
+      apiKey: apiKeyData.apiKey,
+      secret: apiKeyData.apiSecret,
+      enableRateLimit: true,
+      httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+    });
+
+    // 过去 3 个月的数据（Binance 限制）
+    const endTime = Date.now();
+    const startTime = endTime - 90 * 24 * 60 * 60 * 1000;
+
+    console.log('[FundingFee] 开始 API 同步资金费率...');
+
+    let allIncome: any[] = [];
+    try {
+      allIncome = await this.fetchIncomeWithPagination(exchange, startTime, endTime);
+      console.log(`[FundingFee] API 拉取到 ${allIncome.length} 条收入记录`);
+    } catch (err) {
+      console.warn(
+        '[FundingFee] API 拉取失败:',
+        err instanceof Error ? err.message : err
+      );
+      throw new Error('API 拉取资金费失败: ' + (err instanceof Error ? err.message : String(err)));
+    }
+
+    // 只保留 FUNDING_FEE 类型
+    const fundingFees = allIncome.filter((item: any) => item.incomeType === 'FUNDING_FEE');
+    console.log(`[FundingFee] 过滤后 ${fundingFees.length} 条 FUNDING_FEE 记录`);
+
+    if (fundingFees.length === 0) return 0;
+
+    // 写入数据库
+    const imported = await this.saveRecords(fundingFees.map((item: any) => ({
+      apiKeyId,
+      tranId: item.tranId ? String(item.tranId) : null,
+      incomeType: 'FUNDING_FEE',
+      asset: item.asset || 'USDT',
+      symbol: (item.symbol || '').replace('/', '').replace(':USDT', ''),
+      amount: parseFloat(item.income) || 0,
+      amountUsd: parseFloat(item.income) || 0, // U 本位合约资金费本身即 USDT
+      info: item.info || null,
+      timestamp: new Date(item.time),
+    })));
+
+    // 归集到 Leg
+    await this.associateWithLegs(apiKeyId);
+
+    return imported;
+  }
+
+  /**
+   * 通过 CSV 导入资金费
+   */
+  static async syncByCsv(
+    apiKeyId: number,
+    csvContent: string,
+    headerMapping?: IncomeHeaderMapping
+  ): Promise<number> {
+    const records = IncomeCsvService.parseIncomeHistory(csvContent, apiKeyId, headerMapping);
+
+    if (records.length === 0) {
+      throw new Error('CSV 文件解析为空或没有 FUNDING_FEE 类型的记录');
+    }
+
+    console.log(`[FundingFee] CSV 解析到 ${records.length} 条 FUNDING_FEE 记录`);
+
+    const imported = await this.saveRecords(records);
+
+    // 归集到 Leg
+    await this.associateWithLegs(apiKeyId);
+
+    return imported;
+  }
+
+  /**
+   * 批量保存资金费记录（upsert 防重）
+   */
+  private static async saveRecords(records: RawIncomeRecord[]): Promise<number> {
+    let imported = 0;
+
+    for (const record of records) {
+      try {
+        // 如果有 tranId，使用 tranId + incomeType 去重
+        // 如果没有 tranId，使用 symbol + timestamp 去重
+        if (record.tranId) {
+          await prisma.fundingFee.upsert({
+            where: {
+              apiKeyId_tranId_incomeType: {
+                apiKeyId: record.apiKeyId,
+                tranId: record.tranId,
+                incomeType: record.incomeType,
+              },
+            },
+            create: {
+              apiKeyId: record.apiKeyId,
+              tranId: record.tranId,
+              incomeType: record.incomeType,
+              asset: record.asset,
+              symbol: record.symbol,
+              amount: record.amount,
+              amountUsd: record.amountUsd,
+              info: record.info,
+              timestamp: record.timestamp,
+            },
+            update: {}, // 已存在则不更新
+          });
+        } else {
+          // 没有 tranId 时，使用 symbol + timestamp 去重
+          await prisma.fundingFee.upsert({
+            where: {
+              // 需要一个唯一约束来支持 upsert，这里使用 tranId 为 null 的情况
+              // 由于 tranId 可以是 null，我们需要特殊处理
+              id: -1, // 不会匹配到任何记录，强制走 create
+            },
+            create: {
+              apiKeyId: record.apiKeyId,
+              tranId: record.tranId,
+              incomeType: record.incomeType,
+              asset: record.asset,
+              symbol: record.symbol,
+              amount: record.amount,
+              amountUsd: record.amountUsd,
+              info: record.info,
+              timestamp: record.timestamp,
+            },
+            update: {},
+          });
+        }
+        imported++;
+      } catch {
+        // 唯一约束冲突时静默跳过
+      }
+    }
+
+    console.log(`[FundingFee] 入库 ${imported} 条新记录`);
+    return imported;
+  }
+
+  /**
+   * 将 FundingFee 按 (symbol + 时间区间) 关联到 Leg，并刷新 Leg.fundingFeeUsd / netPnL
+   * 支持全量归集（所有未关联的 fee）和增量归集（只处理新 fee）
+   */
+  static async associateWithLegs(apiKeyId: number): Promise<{ associated: number; legsUpdated: number }> {
+    const unlinked = await prisma.fundingFee.findMany({
+      where: { apiKeyId, legId: null },
+    });
+
+    if (unlinked.length === 0) {
+      console.log('[FundingFee] 没有未归集的资金费');
+      return { associated: 0, legsUpdated: 0 };
+    }
+
+    console.log(`[FundingFee] 关联 ${unlinked.length} 条未归集资金费到 Leg...`);
+
+    const apiKeyRow = await prisma.apiKey.findUnique({
+      where: { id: apiKeyId },
+      select: { userId: true },
+    });
+    if (!apiKeyRow) return { associated: 0, legsUpdated: 0 };
+
+    let associated = 0;
+    const updatedLegIds = new Set<number>();
+
+    // 按 symbol 分组，批量查 Leg，减少 N+1 查询
+    const bySymbol: Record<string, typeof unlinked> = {};
+    for (const f of unlinked) {
+      (bySymbol[f.symbol] ??= []).push(f);
+    }
+
+    for (const [symbol, fees] of Object.entries(bySymbol)) {
+      const legs = await prisma.leg.findMany({
+        where: { userId: apiKeyRow.userId, symbol },
+        orderBy: { openDate: 'asc' },
+      });
+
+      // 为每条资金费找到它落在哪个 Leg 的时间窗口
+      for (const fee of fees) {
+        const leg = legs.find(
+          l =>
+            l.openDate <= fee.timestamp &&
+            (l.closeDate === null || l.closeDate >= fee.timestamp)
+        );
+        if (!leg) continue;
+
+        await prisma.fundingFee.update({
+          where: { id: fee.id },
+          data: { legId: leg.id },
+        });
+        associated++;
+        updatedLegIds.add(leg.id);
+      }
+    }
+
+    // 重新聚合每个受影响的 Leg 的资金费总额并更新 netPnL
+    let legsUpdated = 0;
+    const now = new Date();
+    for (const legId of updatedLegIds) {
+      const leg = await prisma.leg.findUnique({
+        where: { id: legId },
+        select: { realisedPnLusd: true, commissionUsd: true, closeDate: true },
+      });
+      if (!leg) continue;
+
+      const legFees = await prisma.fundingFee.findMany({
+        where: { legId },
+        select: { amountUsd: true },
+      });
+
+      const totalFundingUsd = legFees.reduce((s, f) => s + f.amountUsd, 0);
+
+      // 只有 Leg 已平仓 且 资金费在平仓后归集，才加上 fundingFeeUsd
+      const shouldIncludeFunding = leg.closeDate && now > leg.closeDate;
+      const netPnL = shouldIncludeFunding
+        ? leg.realisedPnLusd - leg.commissionUsd + totalFundingUsd
+        : leg.realisedPnLusd - leg.commissionUsd;
+
+      await prisma.leg.update({
+        where: { id: legId },
+        data: {
+          fundingFeeUsd: totalFundingUsd,
+          netPnL,
+          fundingFeeUpdatedAt: now,
+        },
+      });
+      legsUpdated++;
+    }
+
+    console.log(`[FundingFee] 归集完成：关联 ${associated} 条，更新 ${legsUpdated} 个 Leg`);
+    return { associated, legsUpdated };
+  }
+
+  /**
+   * 获取资金费列表（分页、筛选）
+   */
+  static async getFundingFees(params: {
+    apiKeyId?: number;
+    userId: number;
+    symbol?: string;
+    startDate?: Date;
+    endDate?: Date;
+    page?: number;
+    pageSize?: number;
+  }) {
+    const { apiKeyId, userId, symbol, startDate, endDate, page = 1, pageSize = 50 } = params;
+
+    // 构建查询条件
+    const where: any = {};
+
+    if (apiKeyId) {
+      where.apiKeyId = apiKeyId;
+    } else {
+      // 如果没有指定 apiKeyId，查询该用户所有的 apiKey
+      const userApiKeys = await prisma.apiKey.findMany({
+        where: { userId },
+        select: { id: true },
+      });
+      where.apiKeyId = { in: userApiKeys.map(k => k.id) };
+    }
+
+    if (symbol) {
+      where.symbol = { contains: symbol, mode: 'insensitive' };
+    }
+
+    if (startDate || endDate) {
+      where.timestamp = {};
+      if (startDate) where.timestamp.gte = startDate;
+      if (endDate) where.timestamp.lte = endDate;
+    }
+
+    const total = await prisma.fundingFee.count({ where });
+
+    const fees = await prisma.fundingFee.findMany({
+      where,
+      orderBy: { timestamp: 'desc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      include: {
+        apiKey: { select: { name: true, exchange: true } },
+        leg: { select: { id: true, symbol: true, side: true, status: true } },
+      },
+    });
+
+    return {
+      data: fees,
+      pagination: {
+        total,
+        page,
+        pageSize,
+        totalPages: Math.ceil(total / pageSize),
+      },
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 私有：7 天时间窗口分页（与 Trade 分页策略一致）
+  // ─────────────────────────────────────────────────────────────
+
+  private static async fetchIncomeWithPagination(
+    exchange: any,
+    startTime: number,
+    endTime: number
+  ): Promise<any[]> {
+    const results: any[] = [];
+    let currentTime = startTime;
+    const WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+    const limit = 1000;
+
+    while (currentTime < endTime) {
+      const windowEnd = Math.min(currentTime + WINDOW_MS, endTime);
+
+      const batch: any[] = await exchange.fapiPrivateGetIncome({
+        incomeType: 'FUNDING_FEE',
+        startTime: currentTime,
+        endTime: windowEnd,
+        limit,
+        timestamp: Date.now(),
+      });
+
+      if (batch && batch.length > 0) {
+        results.push(...batch);
+
+        if (batch.length === limit) {
+          // 满页：继续拉同一窗口内的后续数据
+          const lastTime = batch[batch.length - 1].time;
+          currentTime = lastTime + 1;
+          continue;
+        }
+      }
+
+      // 未满页或空页：推进到下一个窗口
+      currentTime = windowEnd + 1;
+
+      if (exchange.rateLimit) {
+        await new Promise(r => setTimeout(r, exchange.rateLimit));
+      }
+    }
+
+    return results;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 旧版同步方法（通过 CCXT fetchFundingHistory）
+  // ─────────────────────────────────────────────────────────────
+
+  /**
+   * 同步资金费并完成归集，返回入库条数（旧版，通过 CCXT）
    */
   static async sync(
     exchange: any,
@@ -44,25 +399,46 @@ export class FundingFeeService {
       const base  = parts[0] || '';
       const quote = (parts[1] || 'USDT').split(':')[0];
       const dbSymbol = `${base}${quote}`;
+      const tranId = fee.id ? String(fee.id) : null;
 
       try {
-        await prisma.fundingFee.upsert({
-          where: {
-            apiKeyId_symbol_timestamp: {
+        if (tranId) {
+          // 有 tranId 时，使用唯一约束 upsert
+          await prisma.fundingFee.upsert({
+            where: {
+              apiKeyId_tranId_incomeType: {
+                apiKeyId,
+                tranId,
+                incomeType: 'FUNDING_FEE',
+              },
+            },
+            create: {
               apiKeyId,
+              tranId,
+              incomeType: 'FUNDING_FEE',
+              asset: fee.currency || 'USDT',
               symbol: dbSymbol,
+              amount: fee.amount ?? 0,
+              amountUsd: fee.amount ?? 0,
               timestamp: new Date(fee.timestamp),
             },
-          },
-          create: {
-            apiKeyId,
-            symbol:    dbSymbol,
-            amount:    fee.amount    ?? 0,
-            amountUsd: fee.amount    ?? 0, // U 本位合约资金费本身即 USDT
-            timestamp: new Date(fee.timestamp),
-          },
-          update: {}, // 已存在则不更新
-        });
+            update: {},
+          });
+        } else {
+          // 没有 tranId 时，直接创建（可能重复，靠 try-catch 跳过）
+          await prisma.fundingFee.create({
+            data: {
+              apiKeyId,
+              tranId,
+              incomeType: 'FUNDING_FEE',
+              asset: fee.currency || 'USDT',
+              symbol: dbSymbol,
+              amount: fee.amount ?? 0,
+              amountUsd: fee.amount ?? 0,
+              timestamp: new Date(fee.timestamp),
+            },
+          });
+        }
         imported++;
       } catch {
         // 唯一约束冲突时静默跳过
@@ -76,77 +452,6 @@ export class FundingFeeService {
 
     return imported;
   }
-
-  /**
-   * 将 FundingFee 按 (symbol + 时间区间) 关联到 Leg，并刷新 Leg.fundingFeeUsd / netPnL
-   */
-  static async associateWithLegs(apiKeyId: number): Promise<void> {
-    const unlinked = await prisma.fundingFee.findMany({
-      where: { apiKeyId, legId: null },
-    });
-
-    if (unlinked.length === 0) return;
-
-    console.log(`[FundingFee] 关联 ${unlinked.length} 条未归集资金费到 Leg...`);
-
-    const apiKeyRow = await prisma.apiKey.findUnique({
-      where: { id: apiKeyId },
-      select: { userId: true },
-    });
-    if (!apiKeyRow) return;
-
-    // 按 symbol 分组，批量查 Leg，减少 N+1 查询
-    const bySymbol: Record<string, typeof unlinked> = {};
-    for (const f of unlinked) {
-      (bySymbol[f.symbol] ??= []).push(f);
-    }
-
-    for (const [symbol, fees] of Object.entries(bySymbol)) {
-      const legs = await prisma.leg.findMany({
-        where: { userId: apiKeyRow.userId, symbol },
-        orderBy: { openDate: 'asc' },
-      });
-
-      // 为每条资金费找到它落在哪个 Leg 的时间窗口
-      for (const fee of fees) {
-        const leg = legs.find(
-          l =>
-            l.openDate <= fee.timestamp &&
-            (l.closeDate === null || l.closeDate >= fee.timestamp)
-        );
-        if (!leg) continue;
-
-        await prisma.fundingFee.update({
-          where: { id: fee.id },
-          data: { legId: leg.id },
-        });
-      }
-
-      // 重新聚合每个 Leg 的资金费总额并更新 netPnL
-      for (const leg of legs) {
-        const legFees = await prisma.fundingFee.findMany({
-          where: { legId: leg.id },
-          select: { amountUsd: true },
-        });
-
-        const totalFundingUsd = legFees.reduce((s, f) => s + f.amountUsd, 0);
-
-        await prisma.leg.update({
-          where: { id: leg.id },
-          data: {
-            fundingFeeUsd: totalFundingUsd,
-            netPnL: leg.realisedPnLusd - leg.commissionUsd + totalFundingUsd,
-          },
-        });
-      }
-    }
-
-    console.log('[FundingFee] 归集完成');
-  }
-
-  // ─────────────────────────────────────────────────────────────
-  // 私有：7 天时间窗口分页（与 Trade 分页策略一致）
-  // ─────────────────────────────────────────────────────────────
 
   private static async fetchWithPagination(
     exchange: any,
@@ -173,13 +478,11 @@ export class FundingFeeService {
         results.push(...batch);
 
         if (batch.length === limit) {
-          // 满页：继续拉同一窗口内的后续数据
           startTime = batch[batch.length - 1].timestamp + 1;
           continue;
         }
       }
 
-      // 未满页或空页：推进到下一个窗口
       startTime = windowEnd + 1;
 
       if (exchange.rateLimit) {

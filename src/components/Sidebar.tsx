@@ -11,6 +11,7 @@ import {
   LogOut,
   Menu,
   PanelLeftClose,
+  RefreshCw,
   UserCircle,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -23,9 +24,10 @@ export default function Sidebar() {
   const [user, setUser] = useState<AuthUser | null>(null);
 
   const navItems = [
-    { name: "仪表盘", path: "/", icon: LayoutDashboard },
+    { name: "数据看板", path: "/", icon: LayoutDashboard },
     { name: "深入分析", path: "/analytics", icon: BarChart3 },
     { name: "交易日历", path: "/calendar", icon: CalendarDays },
+    { name: "数据同步", path: "/sync", icon: RefreshCw },
     { name: "AI 报告", path: "/reports", icon: FileText, highlight: true },
     { name: "账号配置", path: "/accounts", icon: Key },
   ];

@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { Card } from "./Card";
 import { KLineChart } from "./KLineChart";
-import { X, FileText, LayoutGrid, TrendingUp, Activity, ExternalLink } from "lucide-react";
+import { X, FileText, LayoutGrid, TrendingUp, Activity, ExternalLink, DollarSign } from "lucide-react";
 import { format } from "date-fns";
 import { legsApi } from "@/lib/api-client";
 
@@ -13,7 +13,7 @@ interface TradeDetailProps {
 }
 
 export function TradeDetail({ trade, onClose }: TradeDetailProps) {
-  const [activeTab, setActiveTab] = useState<'summary' | 'trades' | 'notes'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'trades' | 'funding' | 'notes'>('summary');
   const [fullTradeDetails, setFullTradeDetails] = useState<any>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -99,6 +99,12 @@ export function TradeDetail({ trade, onClose }: TradeDetailProps) {
                    className={`px-5 py-2.5 text-sm font-medium flex items-center gap-2 border-b-2 transition-colors ${activeTab === 'trades' ? 'border-blue-500 text-blue-500' : 'border-transparent text-textMuted hover:text-white hover:border-border'}`}
                  >
                    <Activity size={16} /> 成交明细
+                 </button>
+                 <button 
+                   onClick={() => setActiveTab('funding')}
+                   className={`px-5 py-2.5 text-sm font-medium flex items-center gap-2 border-b-2 transition-colors ${activeTab === 'funding' ? 'border-blue-500 text-blue-500' : 'border-transparent text-textMuted hover:text-white hover:border-border'}`}
+                 >
+                   <DollarSign size={16} /> 资金费用
                  </button>
                  <button 
                    onClick={() => setActiveTab('notes')}
@@ -241,6 +247,49 @@ export function TradeDetail({ trade, onClose }: TradeDetailProps) {
                   </Card>
                 )}
 
+                {activeTab === 'funding' && (
+                  <Card title="资金费用记录 (Funding Fees)" className="h-full border-border/50 bg-panel/50">
+                    {isLoading ? (
+                      <div className="flex flex-col items-center justify-center h-64 text-textMuted">
+                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mb-4"></div>
+                        <p>加载中...</p>
+                      </div>
+                    ) : (!fullTradeDetails || !fullTradeDetails.fundingFees || fullTradeDetails.fundingFees.length === 0) ? (
+                      <div className="text-sm text-textMuted flex flex-col h-full justify-center items-center py-12">
+                        <DollarSign size={48} className="text-border mb-4" />
+                        <p>暂无资金费用记录。</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-left">
+                          <thead className="text-xs text-textMuted uppercase bg-black/20 border-b border-border/50">
+                            <tr>
+                              <th className="px-4 py-3">时间</th>
+                              <th className="px-4 py-3">类型</th>
+                              <th className="px-4 py-3">金额</th>
+                              <th className="px-4 py-3">USD等值</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {fullTradeDetails.fundingFees.map((f: any, index: number) => (
+                              <tr key={f.id || index} className="border-b border-border/50 hover:bg-white/5">
+                                <td className="px-4 py-3 font-mono">{format(new Date(f.timestamp), 'MM-dd HH:mm:ss')}</td>
+                                <td className="px-4 py-3 text-textMuted">{f.incomeType}</td>
+                                <td className={`px-4 py-3 font-mono ${f.amount >= 0 ? 'text-win' : 'text-loss'}`}>
+                                  {f.amount >= 0 ? '+' : ''}{Number(f.amount).toFixed(4)} {f.asset}
+                                </td>
+                                <td className={`px-4 py-3 font-mono ${f.amountUsd >= 0 ? 'text-win' : 'text-loss'}`}>
+                                  {f.amountUsd >= 0 ? '+' : ''}${Number(f.amountUsd).toFixed(4)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </Card>
+                )}
+
                 {activeTab === 'notes' && (
                   <Card title="交易复盘与说明" className="h-full border-border/50 bg-panel/50 flex flex-col">
                     <div className="flex-1 space-y-4">
@@ -290,6 +339,12 @@ export function TradeDetail({ trade, onClose }: TradeDetailProps) {
                      <div className="flex justify-between items-center">
                         <span className="text-sm text-textMuted">手续费</span>
                         <span className="font-mono text-textMain">${Math.abs(trade.commission || 0).toFixed(4)}</span>
+                     </div>
+                     <div className="flex justify-between items-center">
+                        <span className="text-sm text-textMuted">资金费用</span>
+                        <span className={`font-mono ${(trade.fundingFeeUsd || 0) >= 0 ? 'text-win' : 'text-loss'}`}>
+                           {(trade.fundingFeeUsd || 0) >= 0 ? '+' : ''}${(trade.fundingFeeUsd || 0).toFixed(4)}
+                        </span>
                      </div>
                      <div className="flex justify-between items-center">
                         <span className="text-sm text-textMuted">最大持仓量</span>
