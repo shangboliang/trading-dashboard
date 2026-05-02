@@ -110,16 +110,35 @@ export default function Home() {
   }, [loadLegs, loadAccounts]);
 
   // 处理同步
-  const handleSync = async (accountId: number) => {
+  const handleSync = async (accountId: number, forceSync = false) => {
     setSyncingAccountId(accountId);
     setIsSyncing(true);
     
     try {
-      await accountsApi.sync(accountId);
+      await accountsApi.sync(accountId, forceSync);
       alert('同步成功！');
       loadLegs(); // 重新加载数据
     } catch (err) {
-      alert(err instanceof Error ? err.message : '同步失败');
+      const errorMsg = err instanceof Error ? err.message : '同步失败';
+      
+      // 检测时间范围超限错误
+      if (errorMsg.includes('SyncTimeRangeError')) {
+        setIsSyncing(false);
+        setSyncingAccountId(null);
+        const daysMatch = errorMsg.match(/(\d+) 天/);
+        const days = daysMatch ? parseInt(daysMatch[1]) : 90;
+        
+        if (window.confirm(
+          `距上次同步已有 ${Math.floor(days)} 天，数据量较大。\n\n点击"确定"仅同步最近 90 天数据\n点击"取消"放弃同步`
+        )) {
+          setSyncingAccountId(accountId);
+          setIsSyncing(true);
+          await handleSync(accountId, true); // 递归调用
+          return;
+        }
+      } else {
+        alert(errorMsg);
+      }
     } finally {
       setIsSyncing(false);
       setSyncingAccountId(null);

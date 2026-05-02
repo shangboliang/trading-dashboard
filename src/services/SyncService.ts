@@ -12,6 +12,20 @@ import type { Exchange } from '@prisma/client';
 import { BinanceCsvService, type HeaderMapping } from './BinanceCsvService';
 import { buildTradeFingerprint, sanitizeTradeIdentifier } from '@/lib/trade-identity';
 
+/**
+ * 同步时间范围超限错误
+ * 当增量同步的时间跨度超过最大限制时抛出，前端捕获后弹出确认框
+ */
+export class SyncTimeRangeError extends Error {
+  constructor(
+    public daysSinceLastTrade: number,
+    public maxSyncDays: number
+  ) {
+    super(`SyncTimeRangeError: 距上次同步已有 ${Math.floor(daysSinceLastTrade)} 天，超过 ${maxSyncDays} 天限制`);
+    this.name = 'SyncTimeRangeError';
+  }
+}
+
 // 不同交易所的 CCXT ID 映射
 const EXCHANGE_MAP: Record<Exchange, string> = {
   BINANCE: 'binance',
@@ -48,8 +62,10 @@ export class SyncService {
 
   /**
    * 同步指定 API Key 的历史成交数据
+   * @param apiKeyId API Key ID
+   * @param forceSync 强制同步（当时间超过90天时，前端确认后传入）
    */
-  static async syncApiKey(apiKeyId: number): Promise<SyncResult> {
+  static async syncApiKey(apiKeyId: number, forceSync?: boolean): Promise<SyncResult> {
 
     // 1. 并发拦截验证
     const apiKeyDb = await prisma.apiKey.findUnique({
@@ -80,6 +96,7 @@ export class SyncService {
         secret: apiKeyData.apiSecret,
         password: apiKeyData.passphrase,
         enableRateLimit: true,
+        adjustForTimeDifference: true, // 自动调整时间差，避免 timestamp 错误
         // Node.js 不走系统代理，需要显式传入
         httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
         // httpsProxy: process.env.HTTPS_PROXY,
@@ -87,111 +104,109 @@ export class SyncService {
 
       // 强制使用合约/掉期类型
       exchange.options['defaultType'] = 'future';
+      // 增大 recvWindow 容忍时间偏差（币安默认 5000ms）
+      exchange.options['recvWindow'] = 10000;
       
       // 跳过 fetchCurrencies（需要提现权限，且在国内网络易超时）
       exchange.options['fetchCurrencies'] = false;
 
-      // 加载市场数据
+      // 加载市场数据（会自动同步服务器时间）
       const markets = await exchange.loadMarkets();
 
-      // 获取增量同步起始时间：以数据库中最早一条未被覆盖的交易为基准，
-      // 往前回溯 5 分钟作为缓冲，防止上次同步期间产生的新交易被漏拉。
+      // ═══════════════════════════════════════════════════════════════════════
+      // 时间范围确定
+      // ═══════════════════════════════════════════════════════════════════════
+      const MAX_SYNC_DAYS = 90;  // 最大同步天数
+      const BUFFER_MS = 5 * 60 * 1000; // 5 分钟缓冲
+
       const lastTrade = await prisma.trade.findFirst({
         where: { apiKeyId },
         orderBy: { timestamp: 'desc' },
       });
 
-      const BUFFER_MS = 5 * 60 * 1000; // 5 分钟缓冲
-      const since = lastTrade
-        ? lastTrade.timestamp.getTime() - BUFFER_MS
-        : Date.now() - 30 * 24 * 60 * 60 * 1000; // 首次同步默认最近 30 天
+      let since: number;
 
       if (lastTrade) {
+        // 增量同步：检查时间跨度
+        const daysSinceLastTrade = (Date.now() - lastTrade.timestamp.getTime()) / (24 * 60 * 60 * 1000);
+
+        if (daysSinceLastTrade > MAX_SYNC_DAYS && !forceSync) {
+          // 超过90天且未强制同步，抛出自定义错误
+          throw new SyncTimeRangeError(daysSinceLastTrade, MAX_SYNC_DAYS);
+        }
+
+        since = lastTrade.timestamp.getTime() - BUFFER_MS;
         console.log(`增量同步: 数据库最新交易时间 ${lastTrade.timestamp.toISOString()}，回溯 5 分钟后 since = ${new Date(since).toISOString()}`);
       } else {
-        console.log(`首次同步: 无历史记录，since = ${new Date(since).toISOString()} (最近 30 天)`);
+        // 首次同步：默认最近 90 天
+        since = Date.now() - MAX_SYNC_DAYS * 24 * 60 * 60 * 1000;
+        console.log(`首次同步: 无历史记录，since = ${new Date(since).toISOString()} (最近 ${MAX_SYNC_DAYS} 天)`);
       }
 
-      let rawTrades: any[] = [];
+      // ═══════════════════════════════════════════════════════════════════════
+      // 精准定向同步：先通过 COMMISSION 发现活跃币种，再针对性拉取交易
+      // ═══════════════════════════════════════════════════════════════════════
+      const rawTrades: any[] = [];
       const errors: { symbol?: string; error: string }[] = [];
+      const endTime = Date.now();
 
-      try {
-        // 策略 1: 尝试全局拉取所有 U 本位合约交易记录
-        console.log('尝试全局拉取交易记录...');
-        rawTrades = await this.fetchMyTradesWithPagination(exchange, undefined, since);
-        console.log(`全局拉取到 ${rawTrades.length} 条交易`);
-      } catch (globalError) {
-        const globalErrMsg = globalError instanceof Error ? globalError.message : String(globalError);
-        console.warn(`全局拉取失败 (${globalErrMsg})，降级为按交易对遍历`);
+      // 1. 时间切片（最大 90 天一块）
+      const timeChunks = this.createTimeChunks(since, endTime);
+      console.log(`[Sync] 时间范围: ${new Date(since).toISOString()} → ${new Date(endTime).toISOString()}`);
+      console.log(`[Sync] 切分为 ${timeChunks.length} 个时间块（每块最大 90 天）`);
 
-        // 策略 2: 降级为按交易对遍历（仅限 U 本位合约）
-        const activeSymbols = new Set(
-          Object.values(markets)
-            .filter((m: any) => m && m.linear && m.quote === 'USDT') // 过滤掉 undefined 条目
-            .map((m: any) => m.symbol)
-        );
+      // 2. 对每个时间块循环处理
+      for (let i = 0; i < timeChunks.length; i++) {
+        const [chunkStart, chunkEnd] = timeChunks[i];
+        console.log(`\n[Sync] 处理第 ${i + 1}/${timeChunks.length} 块: ${new Date(chunkStart).toISOString()} → ${new Date(chunkEnd).toISOString()}`);
 
-        // 补充数据库中历史已交易过但可能已下架的交易对，避免漏拉
-        const historicalSymbols = await prisma.trade.findMany({
-          where: { apiKeyId },
-          select: { symbol: true },
-          distinct: ['symbol'],
-        });
+        // 2.1 通过 COMMISSION 记录发现活跃币种
+        const { ccxtSymbols, skippedSymbols } =
+          await this.fetchActiveSymbolsViaCommission(exchange, chunkStart, chunkEnd, markets);
 
-        // 将数据库符号转换为 CCXT 格式（BTCUSDT → BTC/USDT:USDT）
-        const historicalCcxtSymbols = historicalSymbols
-          .map(t => {
-            // 尝试从 markets 里找到匹配的 ccxt symbol（数据库存的是 BTCUSDT 格式）
-            const match = Object.values(markets).find(
-              (m: any) => m.linear && m.quote === 'USDT' &&
-                (m.base + m.quote) === t.symbol
-            ) as any;
-            return match?.symbol as string | undefined;
-          })
-          .filter((s): s is string => !!s && !activeSymbols.has(s));
+        if (skippedSymbols.length > 0) {
+          console.log(`[Sync] 跳过 ${skippedSymbols.length} 个已下架币种: ${skippedSymbols.slice(0, 5).join(', ')}${skippedSymbols.length > 5 ? '...' : ''}`);
+        }
 
-        const uMarginSymbols = [...activeSymbols, ...historicalCcxtSymbols];
+        if (ccxtSymbols.length === 0) {
+          console.log(`[Sync] 该时间块无活跃交易，跳过`);
+          continue;
+        }
 
-        console.log(`发现 ${activeSymbols.size} 个活跃 U 本位合约交易对，另补充 ${historicalCcxtSymbols.length} 个历史交易对`);
+        // 2.2 仅遍历活跃币种拉取交易记录
+        let chunkProcessed = 0;
+        let chunkSkipped = 0;
+        let chunkFailed = 0;
 
-        let skippedCount = 0;
-        let failedCount = 0;
-        let processedCount = 0;
-
-        for (const symbol of uMarginSymbols) {
-          processedCount++;
+        for (const symbol of ccxtSymbols) {
           try {
-            const trades = await this.fetchMyTradesWithPagination(exchange, symbol, since);
+            const trades = await this.fetchMyTradesWithPagination(
+              exchange, symbol, chunkStart, chunkEnd
+            );
             if (trades.length > 0) {
-              const oldest = new Date(Math.min(...trades.map(t => t.timestamp))).toISOString().slice(0, 10);
-              const newest = new Date(Math.max(...trades.map(t => t.timestamp))).toISOString().slice(0, 10);
-              console.log(`${symbol} 找到 ${trades.length} 条交易 [${oldest} ~ ${newest}]`);
               rawTrades.push(...trades);
             }
           } catch (err) {
             const errorMsg = err instanceof Error ? err.message : String(err);
-            // 记录所有错误类型的统计
             if (
               errorMsg.includes('not supported') ||
               errorMsg.includes('invalid symbol') ||
               errorMsg.includes('does not have market symbol')
             ) {
-              skippedCount++;
+              chunkSkipped++;
             } else {
-              failedCount++;
-              console.error(`[ERROR] ${symbol} 拉取失败:`, errorMsg);
+              chunkFailed++;
               errors.push({ symbol, error: errorMsg });
+              console.error(`  [ERROR] ${symbol}: ${errorMsg}`);
             }
           }
-
-          // 每处理 100 个交易对打印一次进度
-          if (processedCount % 100 === 0) {
-            console.log(`进度: ${processedCount}/${uMarginSymbols.length}，已找到 ${rawTrades.length} 条，跳过 ${skippedCount} 个，失败 ${failedCount} 个`);
-          }
+          chunkProcessed++;
         }
 
-        console.log(`遍历完成: 共处理 ${processedCount} 个交易对，跳过 ${skippedCount} 个不支持的，失败 ${failedCount} 个，原始交易 ${rawTrades.length} 条`);
+        console.log(`[Sync] 块完成: 处理 ${chunkProcessed}，跳过 ${chunkSkipped}，失败 ${chunkFailed}，累计交易 ${rawTrades.length} 条`);
       }
+
+      console.log(`\n[Sync] 汇总: 共拉取 ${rawTrades.length} 条原始交易，${errors.length} 个错误`);
 
       // 统一解析交易记录
       const allTrades: RawTrade[] = rawTrades.map((trade: any) => {
@@ -721,26 +736,30 @@ export class SyncService {
 
   /**
    * 分页获取用户交易记录
+   * @param endTime 新增参数，支持限定结束时间
    */
   private static async fetchMyTradesWithPagination(
     exchange: any,
     symbol: string | undefined,
-    since: number
+    since: number,
+    endTime?: number
   ): Promise<any[]> {
     let allTrades: any[] = [];
     let startTime = since;
     const limit = 1000;
     const WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // Binance 单次查询最大 7 天
-    const now = Date.now();
+    const now = endTime || Date.now();
     let page = 0;
 
     while (startTime < now) {
       page++;
       const windowEnd = Math.min(startTime + WINDOW_MS, now);
 
-      const trades = await exchange.fetchMyTrades(symbol, startTime, limit, {
-        endTime: windowEnd,
-      });
+      const trades: any[] = await this.callWithRetry(() =>
+        exchange.fetchMyTrades(symbol, startTime, limit, {
+          endTime: windowEnd,
+        })
+      );
 
       if (!trades || trades.length === 0) {
         startTime = windowEnd + 1;
@@ -770,5 +789,175 @@ export class SyncService {
     }
 
     return allTrades;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 精准定向同步 - 辅助函数
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * 将大时间范围切分为多个小块（每块最大 90 天）
+   * 用途：避免单次查询跨度太大，符合 Binance 历史数据限制
+   * 
+   * @param startTime 起始时间戳（ms）
+   * @param endTime 结束时间戳（ms）
+   * @param chunkMs 每块大小（ms），默认 90 天
+   * @returns Array<[start, end]>
+   */
+  private static createTimeChunks(
+    startTime: number,
+    endTime: number,
+    chunkMs: number = 90 * 24 * 60 * 60 * 1000
+  ): [number, number][] {
+    const chunks: [number, number][] = [];
+    let current = startTime;
+
+    while (current < endTime) {
+      const chunkEnd = Math.min(current + chunkMs - 1, endTime);
+      chunks.push([current, chunkEnd]);
+      current = chunkEnd + 1;
+    }
+
+    return chunks;
+  }
+
+  /**
+   * 带自动分页的 Income History 拉取
+   * 核心逻辑：满页（1000 条）则继续拉取，直到取完该时间范围内所有数据
+   * 使用 CCXT 隐式方法: exchange.fapiPrivateGetIncome(params)
+   * 
+   * @param exchange CCXT 交易所实例
+   * @param incomeType 收入类型（如 'COMMISSION', 'FUNDING_FEE'）
+   * @param startTime 起始时间戳（ms）
+   * @param endTime 结束时间戳（ms）
+   * @returns 所有匹配的收入记录
+   */
+  private static async fetchIncomeWithPagination(
+    exchange: any,
+    incomeType: string,
+    startTime: number,
+    endTime: number
+  ): Promise<any[]> {
+    const results: any[] = [];
+    let currentTime = startTime;
+    const limit = 1000;
+
+    while (currentTime <= endTime) {
+      const batch: any[] = await this.callWithRetry(() =>
+        exchange.fapiPrivateGetIncome({
+          incomeType,
+          startTime: currentTime,
+          endTime,
+          limit,
+        })
+      );
+
+      if (!batch || batch.length === 0) {
+        break;
+      }
+
+      results.push(...batch);
+
+      // 满页：还有更多数据，用最后一条的时间作为下一页起点
+      if (batch.length === limit) {
+        const lastTime = typeof batch[batch.length - 1].time === 'string'
+          ? parseInt(batch[batch.length - 1].time)
+          : batch[batch.length - 1].time;
+        currentTime = lastTime + 1;
+        if (exchange.rateLimit) {
+          await new Promise(r => setTimeout(r, exchange.rateLimit));
+        }
+        continue;
+      }
+
+      // 未满页：已取完
+      break;
+    }
+
+    return results;
+  }
+
+  /**
+   * 通用重试封装：遇到时间戳错误时重新同步服务器时间后重试
+   * @param fn 要执行的异步函数
+   * @param maxRetries 最大重试次数
+   */
+  private static async callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+    for (let i = 0; i <= maxRetries; i++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const msg = err?.message || '';
+        const isTimestampError = msg.includes('-1021') || msg.includes('Timestamp') || msg.includes('ahead of the server');
+        if (isTimestampError && i < maxRetries) {
+          console.warn(`[Retry] 时间戳错误，${i + 1}/${maxRetries} 次重试...`);
+          await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('Max retries exceeded');
+  }
+
+  /**
+   * 通过 COMMISSION 类型的 Income 记录发现活跃币种
+   * 优势：只要有成交就必定有手续费，能完美覆盖日内平仓或隔日平仓场景
+   * 
+   * @param exchange CCXT 交易所实例
+   * @param startTime 起始时间戳（ms）
+   * @param endTime 结束时间戳（ms）
+   * @param markets 交易所市场数据（exchange.markets）
+   * @returns { ccxtSymbols: 可处理的 CCXT 格式 symbol, skippedSymbols: 已下架跳过的 symbol }
+   */
+  private static async fetchActiveSymbolsViaCommission(
+    exchange: any,
+    startTime: number,
+    endTime: number,
+    markets: any
+  ): Promise<{
+    ccxtSymbols: string[];
+    skippedSymbols: string[];
+  }> {
+    // 1. 拉取所有 COMMISSION 记录
+    const incomeRecords = await this.fetchIncomeWithPagination(
+      exchange, 'COMMISSION', startTime, endTime
+    );
+
+    // 2. 提取并去重 symbol（过滤空 symbol）
+    const dbSymbols = new Set<string>();
+    for (const record of incomeRecords) {
+      if (record.symbol && record.symbol.trim()) {
+        // 原始格式可能是 "BTCUSDT" 或 "BTC/USDT"，统一为 "BTCUSDT"
+        const normalized = record.symbol.replace('/', '').replace(':USDT', '');
+        dbSymbols.add(normalized);
+      }
+    }
+
+    // 3. 转换为 CCXT 格式，并区分已下架币种
+    const ccxtSymbols: string[] = [];
+    const skippedSymbols: string[] = [];
+    const uMarkets = Object.values(markets).filter(
+      (m: any) => m && m.linear && m.quote === 'USDT'
+    );
+
+    for (const dbSymbol of dbSymbols) {
+      const match = uMarkets.find(
+        (m: any) => (m.base + m.quote) === dbSymbol
+      ) as any;
+
+      if (match) {
+        ccxtSymbols.push(match.symbol); // 如 'BTC/USDT:USDT'
+      } else {
+        skippedSymbols.push(dbSymbol); // 如 'NTRNUSDT'（已下架）
+      }
+    }
+
+    console.log(`[Discovery] 发现 ${ccxtSymbols.length} 个活跃币种，${skippedSymbols.length} 个已下架跳过`);
+    if (ccxtSymbols.length > 0) {
+      console.log(`[Discovery] 活跃币种: ${ccxtSymbols.slice(0, 10).join(', ')}${ccxtSymbols.length > 10 ? '...' : ''}`);
+    }
+
+    return { ccxtSymbols, skippedSymbols };
   }
 }

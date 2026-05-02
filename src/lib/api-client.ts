@@ -188,7 +188,7 @@ export const accountsApi = {
     apiPost<ApiAccount>('/accounts', data),
   update: (id: number, data: any) => apiPut(`/accounts/${id}`, data),
   delete: (id: number) => apiDelete(`/accounts/${id}`),
-  sync: (apiKeyId: number) => apiPost('/sync', { apiKeyId }),
+  sync: (apiKeyId: number, forceSync?: boolean) => apiPost('/sync', { apiKeyId, forceSync }),
   syncByCsv: (apiKeyId: number, file: File, headerMapping?: Record<string, string>) => {
     const formData = new FormData();
     formData.append('apiKeyId', apiKeyId.toString());

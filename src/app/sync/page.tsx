@@ -83,15 +83,33 @@ export default function SyncPage() {
   // 订单同步相关
   // ─────────────────────────────────────────────────────────────
 
-  const handleTradeApiSync = async () => {
+  const handleTradeApiSync = async (forceSync = false) => {
     if (!selectedAccountId) return;
     setIsSyncing(true);
     setSyncMessage(null);
     try {
-      await accountsApi.sync(selectedAccountId);
+      await accountsApi.sync(selectedAccountId, forceSync);
       setSyncMessage('订单 API 同步成功！');
+      loadAccounts(); // 刷新账户列表
     } catch (err) {
-      setSyncMessage(err instanceof Error ? err.message : '同步失败');
+      const errorMsg = err instanceof Error ? err.message : '同步失败';
+      
+      // 检测时间范围超限错误
+      if (errorMsg.includes('SyncTimeRangeError')) {
+        setIsSyncing(false); // 先停止 loading
+        const daysMatch = errorMsg.match(/(\d+) 天/);
+        const days = daysMatch ? parseInt(daysMatch[1]) : 90;
+        
+        if (window.confirm(
+          `距上次同步已有 ${Math.floor(days)} 天，数据量较大。\n\n点击"确定"仅同步最近 90 天数据\n点击"取消"放弃同步`
+        )) {
+          setIsSyncing(true);
+          await handleTradeApiSync(true); // 递归调用，带 forceSync=true
+          return;
+        }
+      } else {
+        setSyncMessage(errorMsg);
+      }
     } finally {
       setIsSyncing(false);
     }
@@ -286,6 +304,58 @@ export default function SyncPage() {
         <p className="text-textMuted mt-2 text-lg">同步订单记录、资金费用，补算 MAE/MFE 质量指标</p>
       </header>
 
+      {/* 使用建议 */}
+      <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-5">
+        <div className="flex items-start gap-3">
+          <Info className="text-amber-400 mt-0.5 shrink-0" size={20} />
+          <div className="space-y-3 text-sm">
+            <div className="font-bold text-amber-400 text-base">导入方式选择建议</div>
+
+            <div className="space-y-1.5">
+              <div className="text-white font-medium">推荐：CSV 导入</div>
+              <ul className="list-disc list-inside text-textMuted space-y-0.5">
+                <li>支持全部历史数据，不受 API 时间范围限制</li>
+                <li>数据完整可靠，不会因 API 机制遗漏交易</li>
+                <li>Binance 下载路径：数据下载中心 → 交易历史 → 交易历史 / 资金流水</li>
+              </ul>
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="text-white font-medium">API 同步的局限性</div>
+              <ul className="list-disc list-inside text-textMuted space-y-0.5">
+                <li>仅支持最近 90 天内的数据，更早的历史无法拉取</li>
+                <li>通过佣金记录反推活跃币种，零费率活动期间的交易可能被遗漏</li>
+                <li>已下架的交易对会被自动跳过</li>
+                <li>不支持币本位（反向）合约，仅支持 USDT 本位</li>
+              </ul>
+            </div>
+
+            <div className="border-t border-amber-500/10 pt-3">
+              <div className="text-white font-medium mb-1.5">重要：时间格式统一</div>
+              <p className="text-textMuted">
+                订单 CSV 与资金费用 CSV 的时间格式必须保持一致 —— 同时使用 UTC 或同时使用 UTC+8。
+                如果两者时间基准不同，资金费用将无法正确归集到对应持仓，导致 P&L 计算偏差。
+              </p>
+            </div>
+
+            <div className="border-t border-amber-500/10 pt-3">
+              <div className="text-white font-medium mb-1.5">Binance CSV 下载参考</div>
+              <p className="text-textMuted mb-2">
+                交易历史：合约 → 交易历史 → 下载交易历史<br />
+                交易历史：合约 → 交易历史 → 下载资金流水
+              </p>
+              <div className="flex gap-3 flex-wrap">
+                <a href="/guide/binance-trade-history.png" target="_blank" rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300 underline underline-offset-2">
+                  <Download size={12} /> 交易历史下载截图
+                </a>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      </div>
+
       {/* 账户选择 */}
       <Card>
         <div className="flex items-center gap-4">
@@ -374,10 +444,10 @@ export default function SyncPage() {
               </div>
             </div>
             <p className="text-sm text-textMuted mb-4">
-              通过交易所 API 拉取最近 30 天的成交记录。受 API 限制，无法获取更早的历史数据。
+              通过交易所 API 拉取最近 90 天的成交记录。仅支持 USDT 本位合约，零费率期间的交易可能遗漏。
             </p>
             <button
-              onClick={handleTradeApiSync}
+              onClick={() => handleTradeApiSync()}
               disabled={isSyncing || !selectedAccountId}
               className="w-full bg-blue-600 text-white px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-blue-500 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
             >
@@ -407,6 +477,11 @@ export default function SyncPage() {
                 <div><span className="text-blue-400">Price</span></div>
                 <div><span className="text-blue-400">Quantity</span></div>
               </div>
+              <div className="mt-1.5 text-[10px] text-amber-300/70">下载路径：资产 → 交易历史 → 下载交易历史</div>
+            </div>
+
+            <div className="bg-amber-500/5 border border-amber-500/15 rounded-lg p-2 text-[11px] text-amber-300/80 mb-3">
+              时间字段请选择 <span className="font-medium text-amber-300">UTC</span> 或 <span className="font-medium text-amber-300">UTC+8</span>，且与资金费用 CSV 保持一致，否则归集会出错。
             </div>
 
             <input
@@ -524,7 +599,7 @@ export default function SyncPage() {
               </div>
             </div>
             <p className="text-sm text-textMuted mb-4">
-              调用交易所 API 拉取最近 3 个月的资金费记录。自动过滤 FUNDING_FEE 类型，关联到对应持仓。
+              调用交易所 API 拉取最近 3 个月的资金费记录。仅支持 USDT 本位合约，自动过滤 FUNDING_FEE 类型并关联到对应持仓。
             </p>
             <button
               onClick={handleFundingApiSync}
@@ -557,6 +632,11 @@ export default function SyncPage() {
                 <div><span className="text-green-400">交易对</span> <span className="text-loss">*</span></div>
               </div>
               <div className="mt-1 text-[10px] text-textMuted/60">只导入 FUNDING_FEE 类型</div>
+              <div className="mt-1 text-[10px] text-amber-300/70">下载路径：资产 → 交易历史 → 下载资金流水</div>
+            </div>
+
+            <div className="bg-amber-500/5 border border-amber-500/15 rounded-lg p-2 text-[11px] text-amber-300/80 mb-3">
+              时间基准必须与订单 CSV 一致（同为 UTC 或同为 UTC+8），否则资金费用无法正确归集到持仓。
             </div>
 
             <input

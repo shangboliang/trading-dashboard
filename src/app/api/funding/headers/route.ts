@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { IncomeCsvService } from '@/services/IncomeCsvService';
 import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
+import { decodeCsv } from '@/utils/csv-encoding';
 
 /**
  * POST /api/funding/headers
@@ -18,7 +19,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'file 缺失' }, { status: 400 });
     }
 
-    const csvContent = await file.text();
+    const csvContent = decodeCsv(await file.arrayBuffer());
     const headers = IncomeCsvService.detectHeaders(csvContent);
 
     return NextResponse.json({ headers });

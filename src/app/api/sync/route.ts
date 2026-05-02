@@ -9,11 +9,12 @@ import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@
  * 
  * Body:
  * - apiKeyId: number
+ * - forceSync?: boolean (强制同步，当时间超过90天时前端确认后传入)
  */
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { apiKeyId } = body;
+    const { apiKeyId, forceSync } = body;
     
     if (!apiKeyId) {
       return NextResponse.json(
@@ -26,7 +27,7 @@ export async function POST(request: NextRequest) {
     const user = await requireUser();
     await requireApiKeyOwner(Number(apiKeyId), user.id);
 
-    const result = await SyncService.syncApiKey(apiKeyId);
+    const result = await SyncService.syncApiKey(apiKeyId, forceSync);
     
     return NextResponse.json({
       message: '同步成功',

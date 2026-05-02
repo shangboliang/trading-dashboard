@@ -2,6 +2,7 @@ export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { FundingFeeService } from '@/services/FundingFeeService';
 import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@/lib/auth';
+import { decodeCsv } from '@/utils/csv-encoding';
 import { type IncomeHeaderMapping } from '@/services/IncomeCsvService';
 
 /**
@@ -67,7 +68,7 @@ export async function POST(request: NextRequest) {
     const user = await requireUser();
     await requireApiKeyOwner(apiKeyId, user.id);
 
-    const csvContent = await file.text();
+    const csvContent = decodeCsv(await file.arrayBuffer());
     const imported = await FundingFeeService.syncByCsv(apiKeyId, csvContent, headerMapping);
 
     return NextResponse.json({ message: '资金费导入成功', imported });

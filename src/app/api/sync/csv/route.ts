@@ -4,6 +4,7 @@ import { SyncService } from '@/services/SyncService';
 import { ApiKeyService } from '@/services/ApiKeyService';
 import prisma from '@/lib/prisma';
 import { AuthError, authErrorResponse, requireApiKeyOwner, requireUser } from '@/lib/auth';
+import { decodeCsv } from '@/utils/csv-encoding';
 import { type HeaderMapping } from '@/services/BinanceCsvService';
 
 export async function POST(request: NextRequest) {
@@ -49,7 +50,7 @@ export async function POST(request: NextRequest) {
     await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING', undefined, user.id);
 
     try {
-      const csvContent = await file.text();
+      const csvContent = decodeCsv(await file.arrayBuffer());
       const result = await SyncService.syncByCsv(apiKeyId, csvContent, headerMapping);
 
       // 解锁状态
