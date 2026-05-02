@@ -347,6 +347,8 @@ model Leg {
   commissionUsd   Float     @default(0)
   
   /// 最终净利润 = realisedPnLusd - commissionUsd + fundingFeeUsd
+  /// 由 SyncService.saveLegsBatch 在每次重聚合时正确计算（保留已有 fundingFeeUsd）
+  /// FundingFeeService.associateWithLegs 也会在归集资金费后更新此字段
   netPnL          Float     @default(0)
 
   /// 持仓期间累计产生的资金费（负=支付，正=收入），USD 计价

@@ -58,6 +58,11 @@ export class MaeMfeService {
     let done = 0;
     for (const leg of legs) {
       try {
+        // 跳过包含非 ASCII 字符的 symbol（如中文币名），Binance 不支持
+        if (/[^\x00-\x7F]/.test(leg.symbol)) {
+          console.warn(`[MAE/MFE] Leg ${leg.id} (${leg.symbol}) 跳过: symbol 包含非 ASCII 字符`);
+          continue;
+        }
         await this.calculateForLeg(exchange, leg);
         done++;
       } catch (err) {
@@ -157,7 +162,7 @@ private static async calculateForLeg(exchange: any, leg: LegRow): Promise<void> 
   }
 
   /**
-   * 带分页的 OHLCV 拉取 (防封禁智能优化版)
+   * 带分页 + 重试的 OHLCV 拉取
    */
   private static async fetchOHLCV(
     exchange: any,
@@ -170,27 +175,42 @@ private static async calculateForLeg(exchange: any, leg: LegRow): Promise<void> 
     const candles: number[][] = [];
     let startTime = since;
 
-    // 绝对上限设置为 1000，彻底避开 >1000 触发的权重 10 惩罚
     const MAX_LIMIT = 1000;
+    const MAX_RETRIES = 3;
 
     while (startTime < until) {
-      // 1. 精确计算本次实际需要的 K 线数量，绝不多拉
       const requiredCandles = Math.ceil((until - startTime) / candleMs);
       let currentLimit = Math.min(MAX_LIMIT, requiredCandles);
 
-      // 2. 智能降级（权重极客优化）
-      // 避免刚刚越过界限触发高权重惩罚，比如需要 505 根时截断为 499 (权重由 5 降为 2)
       if (currentLimit >= 500 && currentLimit < 750) {
         currentLimit = 499;
       }
 
-      const batch: number[][] = await exchange.fetchOHLCV(
-        symbol,
-        timeframe,
-        startTime,
-        currentLimit,
-        { endTime: until }
-      );
+      let batch: number[][] | null = null;
+      for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          batch = await exchange.fetchOHLCV(
+            symbol,
+            timeframe,
+            startTime,
+            currentLimit,
+            { endTime: until }
+          );
+          break;
+        } catch (err: any) {
+          const msg = err?.message || '';
+          const isTimeout = msg.includes('timed out') || msg.includes('timeout');
+          const isNetwork = msg.includes('fetch failed') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT');
+
+          if ((isTimeout || isNetwork) && attempt < MAX_RETRIES) {
+            const delay = 2000 * (attempt + 1);
+            console.warn(`[MAE/MFE] ${symbol} OHLCV 第 ${attempt + 1}/${MAX_RETRIES} 次重试 (${isTimeout ? '超时' : '网络错误'})，等待 ${delay}ms`);
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+          throw err;
+        }
+      }
 
       if (!batch || batch.length === 0) break;
 
@@ -198,30 +218,24 @@ private static async calculateForLeg(exchange: any, leg: LegRow): Promise<void> 
 
       const lastTs = batch[batch.length - 1][0];
 
-      // 如果拉出来的数据不到期望的数量，说明数据已经到头了
       if (batch.length < currentLimit) break;
 
-      // 满页：推进到下一根 K 线起点
       startTime = lastTs + candleMs;
 
-      // 防止异常数据导致的死循环
       if (startTime <= lastTs) {
         startTime = lastTs + 1;
       }
 
-      // 3. 动态权重休眠保护
-      // 计算本次请求消耗的 Binance 权重
       let weightConsumed = 1;
       if (currentLimit >= 500) {
         weightConsumed = 5;
       } else if (currentLimit >= 100) {
-        weightConsumed = 2; 
+        weightConsumed = 2;
       }
 
-      // 让大权重请求后强制多休息一会儿，保护服务器 IP 不被拉黑
       const baseRateLimit = exchange.rateLimit || 100;
-      const sleepMs = Math.max(baseRateLimit, weightConsumed * 50); 
-      
+      const sleepMs = Math.max(baseRateLimit, weightConsumed * 50);
+
       await new Promise(r => setTimeout(r, sleepMs));
     }
 

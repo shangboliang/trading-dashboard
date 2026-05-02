@@ -33,21 +33,22 @@ export async function POST(request: NextRequest) {
     const user = await requireUser();
     await requireApiKeyOwner(apiKeyId, user.id);
 
-    const apiKeyDb = await prisma.apiKey.findUnique({
-      where: { id: apiKeyId },
-      select: { syncStatus: true }
+    // 原子抢锁：避免“先查再更”导致并发重复触发
+    const lockResult = await prisma.apiKey.updateMany({
+      where: {
+        id: apiKeyId,
+        userId: user.id,
+        syncStatus: { not: 'SYNCING' },
+      },
+      data: {
+        syncStatus: 'SYNCING',
+        errorMessage: null,
+      },
     });
 
-    if (!apiKeyDb) {
-      return NextResponse.json({ error: 'API Key 不存在' }, { status: 404 });
-    }
-
-    if (apiKeyDb.syncStatus === 'SYNCING') {
+    if (lockResult.count === 0) {
       return NextResponse.json({ error: '数据正在同步或计算中，请勿重复触发' }, { status: 409 });
     }
-
-    // 锁定状态
-    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING', undefined, user.id);
 
     try {
       const csvContent = decodeCsv(await file.arrayBuffer());

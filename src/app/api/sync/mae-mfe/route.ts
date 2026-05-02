@@ -58,6 +58,7 @@ export async function POST(request: NextRequest) {
         secret: apiKeyData.apiSecret,
         password: apiKeyData.passphrase,
         enableRateLimit: true,
+        timeout: 30000,
         httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
       });
 

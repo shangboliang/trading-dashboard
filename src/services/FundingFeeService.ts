@@ -12,8 +12,143 @@
 import prisma from '@/lib/prisma';
 import { ApiKeyService } from './ApiKeyService';
 import { IncomeCsvService, type IncomeHeaderMapping, type RawIncomeRecord } from './IncomeCsvService';
+import { Prisma } from '@prisma/client';
 
 export class FundingFeeService {
+  private static readonly WRITE_CONFLICT_RETRY = 3;
+  private static readonly API_RETRY_LIMIT = 3;
+
+  private static isKnownRequestError(error: unknown, code: string): boolean {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === code;
+  }
+
+  private static toFundingFeeCreateData(record: RawIncomeRecord) {
+    return {
+      apiKeyId: record.apiKeyId,
+      tranId: record.tranId,
+      incomeType: record.incomeType,
+      asset: record.asset,
+      symbol: record.symbol,
+      amount: record.amount,
+      amountUsd: record.amountUsd,
+      info: record.info,
+      timestamp: record.timestamp,
+    };
+  }
+
+  private static async createRecordWithoutTranId(record: RawIncomeRecord): Promise<boolean> {
+    for (let attempt = 0; attempt <= this.WRITE_CONFLICT_RETRY; attempt++) {
+      try {
+        return await prisma.$transaction(
+          async (tx) => {
+            const existing = await tx.fundingFee.findFirst({
+              where: {
+                apiKeyId: record.apiKeyId,
+                tranId: null,
+                incomeType: record.incomeType,
+                symbol: record.symbol,
+                timestamp: record.timestamp,
+                asset: record.asset,
+                amount: record.amount,
+                amountUsd: record.amountUsd,
+              },
+              select: { id: true },
+            });
+
+            if (existing) return false;
+
+            await tx.fundingFee.create({
+              data: this.toFundingFeeCreateData(record),
+            });
+            return true;
+          },
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+        );
+      } catch (error) {
+        if (this.isKnownRequestError(error, 'P2002')) return false;
+        if (this.isKnownRequestError(error, 'P2034') && attempt < this.WRITE_CONFLICT_RETRY) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return false;
+  }
+
+  private static async syncExchangeTime(exchange: any): Promise<void> {
+    try {
+      const serverTime = await exchange.fetchTime();
+      exchange.options['timeDifference'] = Date.now() - serverTime;
+      console.log(`[FundingFee] 服务器时间同步: 本地时差 ${exchange.options['timeDifference']}ms`);
+    } catch (error) {
+      console.warn(
+        '[FundingFee] fetchTime 失败，使用默认时间差:',
+        error instanceof Error ? error.message : error
+      );
+    }
+  }
+
+  private static parseApiTimestamp(rawValue: unknown): Date | null {
+    if (rawValue instanceof Date) {
+      return Number.isNaN(rawValue.getTime()) ? null : rawValue;
+    }
+
+    if (typeof rawValue === 'number') {
+      const epoch = Math.abs(rawValue) < 1e12 ? rawValue * 1000 : rawValue;
+      const parsed = new Date(epoch);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    if (typeof rawValue === 'string') {
+      const trimmed = rawValue.trim();
+      if (!trimmed) return null;
+
+      if (/^\d+$/.test(trimmed)) {
+        const numeric = Number(trimmed);
+        if (Number.isFinite(numeric)) {
+          const epoch = trimmed.length <= 10 ? numeric * 1000 : numeric;
+          const parsed = new Date(epoch);
+          return Number.isNaN(parsed.getTime()) ? null : parsed;
+        }
+      }
+
+      const parsed = new Date(trimmed);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    return null;
+  }
+
+  private static async callWithRetry<T>(
+    fn: () => Promise<T>,
+    exchange: any,
+    maxRetries = this.API_RETRY_LIMIT
+  ): Promise<T> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        const message = error?.message || '';
+        const isTimestampError =
+          message.includes('-1021') ||
+          message.includes('Timestamp') ||
+          message.includes('ahead of the server');
+
+        if (isTimestampError && attempt < maxRetries) {
+          console.warn(`[FundingFee] 时间戳错误，重试 ${attempt + 1}/${maxRetries}...`);
+          await this.syncExchangeTime(exchange);
+          await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    throw new Error('Funding fee sync retries exhausted');
+  }
+
   /**
    * 通过 API 同步资金费（调用 Binance Income History API）
    */
@@ -25,15 +160,26 @@ export class FundingFeeService {
     const exchange = new (ccxt as any)[exchangeId]({
       apiKey: apiKeyData.apiKey,
       secret: apiKeyData.apiSecret,
+      password: apiKeyData.passphrase,
       enableRateLimit: true,
+      adjustForTimeDifference: true, // 自动调整时间差，避免 timestamp 错误
+      // Node.js 不走系统代理，需要显式传入
       httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+      // httpsProxy: process.env.HTTPS_PROXY,
     });
-
+    // 强制使用合约/掉期类型
+    exchange.options['defaultType'] = 'future';
+    // 增大 recvWindow 容忍时间偏差（币安默认 5000ms）
+    exchange.options['recvWindow'] = 10000;
+      
+    // 跳过 fetchCurrencies（需要提现权限，且在国内网络易超时）
+    exchange.options['fetchCurrencies'] = false;
     // 过去 3 个月的数据（Binance 限制）
     const endTime = Date.now();
     const startTime = endTime - 90 * 24 * 60 * 60 * 1000;
 
     console.log('[FundingFee] 开始 API 同步资金费率...');
+    await this.syncExchangeTime(exchange);
 
     let allIncome: any[] = [];
     try {
@@ -53,18 +199,44 @@ export class FundingFeeService {
 
     if (fundingFees.length === 0) return 0;
 
+    const records: RawIncomeRecord[] = [];
+    let skippedInvalidTimestamp = 0;
+
+    for (const item of fundingFees) {
+      const timestamp = this.parseApiTimestamp(item.time);
+      if (!timestamp) {
+        skippedInvalidTimestamp++;
+        console.warn('[FundingFee] 跳过时间无效的 API 记录:', {
+          tranId: item.tranId ?? null,
+          symbol: item.symbol ?? '',
+          rawTime: item.time,
+        });
+        continue;
+      }
+
+      records.push({
+        apiKeyId,
+        tranId: item.tranId ? String(item.tranId) : null,
+        incomeType: 'FUNDING_FEE',
+        asset: item.asset || 'USDT',
+        symbol: (item.symbol || '').replace('/', '').replace(':USDT', ''),
+        amount: parseFloat(item.income) || 0,
+        amountUsd: parseFloat(item.income) || 0, // U 本位合约资金费本身即 USDT
+        info: item.info || null,
+        timestamp,
+      });
+    }
+
+    if (skippedInvalidTimestamp > 0) {
+      console.warn(`[FundingFee] 跳过 ${skippedInvalidTimestamp} 条时间无效的 API 记录`);
+    }
+
+    if (records.length === 0) {
+      throw new Error('API 返回的资金费记录时间字段均无效');
+    }
+
     // 写入数据库
-    const imported = await this.saveRecords(fundingFees.map((item: any) => ({
-      apiKeyId,
-      tranId: item.tranId ? String(item.tranId) : null,
-      incomeType: 'FUNDING_FEE',
-      asset: item.asset || 'USDT',
-      symbol: (item.symbol || '').replace('/', '').replace(':USDT', ''),
-      amount: parseFloat(item.income) || 0,
-      amountUsd: parseFloat(item.income) || 0, // U 本位合约资金费本身即 USDT
-      info: item.info || null,
-      timestamp: new Date(item.time),
-    })));
+    const imported = await this.saveRecords(records);
 
     // 归集到 Leg
     await this.associateWithLegs(apiKeyId);
@@ -100,63 +272,28 @@ export class FundingFeeService {
    * 批量保存资金费记录（幂等防重）
    *
    * 有 tranId 时用 @@unique([apiKeyId, tranId, incomeType]) 去重；
-   * 无 tranId 时先按 (apiKeyId, symbol, timestamp) 查重，不存在才插入。
+   * 无 tranId 时按业务键 + 串行化事务防重，仅真实新增才计数。
    */
   private static async saveRecords(records: RawIncomeRecord[]): Promise<number> {
     let imported = 0;
 
     for (const record of records) {
-      try {
-        if (record.tranId) {
-          await prisma.fundingFee.upsert({
-            where: {
-              apiKeyId_tranId_incomeType: {
-                apiKeyId: record.apiKeyId,
-                tranId: record.tranId,
-                incomeType: record.incomeType,
-              },
-            },
-            create: {
-              apiKeyId: record.apiKeyId,
-              tranId: record.tranId,
-              incomeType: record.incomeType,
-              asset: record.asset,
-              symbol: record.symbol,
-              amount: record.amount,
-              amountUsd: record.amountUsd,
-              info: record.info,
-              timestamp: record.timestamp,
-            },
-            update: {},
-          });
-        } else {
-          const existing = await prisma.fundingFee.findFirst({
-            where: {
-              apiKeyId: record.apiKeyId,
-              symbol: record.symbol,
-              timestamp: record.timestamp,
-              tranId: null,
-            },
-          });
-          if (existing) continue;
-
+      if (record.tranId) {
+        try {
           await prisma.fundingFee.create({
-            data: {
-              apiKeyId: record.apiKeyId,
-              tranId: null,
-              incomeType: record.incomeType,
-              asset: record.asset,
-              symbol: record.symbol,
-              amount: record.amount,
-              amountUsd: record.amountUsd,
-              info: record.info,
-              timestamp: record.timestamp,
-            },
+            data: this.toFundingFeeCreateData(record),
           });
+          imported++;
+        } catch (error) {
+          if (this.isKnownRequestError(error, 'P2002')) continue;
+          throw error;
         }
+        continue;
+      }
+
+      const created = await this.createRecordWithoutTranId(record);
+      if (created) {
         imported++;
-      } catch {
-        // 唯一约束冲突时静默跳过
       }
     }
 
@@ -213,11 +350,13 @@ export class FundingFeeService {
 
         const newLegId = leg?.id ?? null;
         if (fee.legId !== newLegId) {
+          const oldLegId = fee.legId;
           await prisma.fundingFee.update({
             where: { id: fee.id },
             data: { legId: newLegId },
           });
           associated++;
+          if (oldLegId !== null) updatedLegIds.add(oldLegId);
           if (newLegId !== null) updatedLegIds.add(newLegId);
         }
       }
@@ -276,17 +415,9 @@ export class FundingFeeService {
     const { apiKeyId, userId, symbol, startDate, endDate, page = 1, pageSize = 50 } = params;
 
     // 构建查询条件
-    const where: any = {};
-
-    if (apiKeyId) {
+    const where: any = { apiKey: { userId } };
+    if (apiKeyId !== undefined) {
       where.apiKeyId = apiKeyId;
-    } else {
-      // 如果没有指定 apiKeyId，查询该用户所有的 apiKey
-      const userApiKeys = await prisma.apiKey.findMany({
-        where: { userId },
-        select: { id: true },
-      });
-      where.apiKeyId = { in: userApiKeys.map(k => k.id) };
     }
 
     if (symbol) {
@@ -334,37 +465,43 @@ export class FundingFeeService {
   ): Promise<any[]> {
     const results: any[] = [];
     let currentTime = startTime;
-    const WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
     const limit = 1000;
 
-    while (currentTime < endTime) {
-      const windowEnd = Math.min(currentTime + WINDOW_MS, endTime);
+    while (currentTime <= endTime) {
+      const batch: any[] = await this.callWithRetry(
+        () =>
+          exchange.fapiPrivateGetIncome({
+            incomeType: 'FUNDING_FEE',
+            startTime: currentTime,
+            endTime,
+            limit,
+          }),
+        exchange
+      );
 
-      const batch: any[] = await exchange.fapiPrivateGetIncome({
-        incomeType: 'FUNDING_FEE',
-        startTime: currentTime,
-        endTime: windowEnd,
-        limit,
-        timestamp: Date.now(),
-      });
-
-      if (batch && batch.length > 0) {
-        results.push(...batch);
-
-        if (batch.length === limit) {
-          // 满页：继续拉同一窗口内的后续数据
-          const lastTime = batch[batch.length - 1].time;
-          currentTime = lastTime + 1;
-          continue;
-        }
+      if (!batch || batch.length === 0) {
+        break;
       }
 
-      // 未满页或空页：推进到下一个窗口
-      currentTime = windowEnd + 1;
+      results.push(...batch);
+
+      if (batch.length === limit) {
+        const lastTime = typeof batch[batch.length - 1].time === 'string'
+          ? parseInt(batch[batch.length - 1].time, 10)
+          : batch[batch.length - 1].time;
+        currentTime = lastTime + 1;
+
+        if (exchange.rateLimit) {
+          await new Promise((resolve) => setTimeout(resolve, exchange.rateLimit));
+        }
+        continue;
+      }
 
       if (exchange.rateLimit) {
-        await new Promise(r => setTimeout(r, exchange.rateLimit));
+        await new Promise((resolve) => setTimeout(resolve, exchange.rateLimit));
       }
+
+      break;
     }
 
     return results;
@@ -400,58 +537,24 @@ export class FundingFeeService {
 
     if (allFunding.length === 0) return 0;
 
-    // 写入数据库（upsert 防重）
-    let imported = 0;
-    for (const fee of allFunding) {
-      const parts = (fee.symbol as string).split('/');
-      const base  = parts[0] || '';
+    const records: RawIncomeRecord[] = allFunding.map((fee) => {
+      const parts = String(fee.symbol || '').split('/');
+      const base = parts[0] || '';
       const quote = (parts[1] || 'USDT').split(':')[0];
-      const dbSymbol = `${base}${quote}`;
-      const tranId = fee.id ? String(fee.id) : null;
+      return {
+        apiKeyId,
+        tranId: fee.id ? String(fee.id) : null,
+        incomeType: 'FUNDING_FEE',
+        asset: fee.currency || 'USDT',
+        symbol: `${base}${quote}`,
+        amount: Number(fee.amount) || 0,
+        amountUsd: Number(fee.amount) || 0,
+        info: null,
+        timestamp: new Date(fee.timestamp),
+      };
+    });
 
-      try {
-        if (tranId) {
-          // 有 tranId 时，使用唯一约束 upsert
-          await prisma.fundingFee.upsert({
-            where: {
-              apiKeyId_tranId_incomeType: {
-                apiKeyId,
-                tranId,
-                incomeType: 'FUNDING_FEE',
-              },
-            },
-            create: {
-              apiKeyId,
-              tranId,
-              incomeType: 'FUNDING_FEE',
-              asset: fee.currency || 'USDT',
-              symbol: dbSymbol,
-              amount: fee.amount ?? 0,
-              amountUsd: fee.amount ?? 0,
-              timestamp: new Date(fee.timestamp),
-            },
-            update: {},
-          });
-        } else {
-          // 没有 tranId 时，直接创建（可能重复，靠 try-catch 跳过）
-          await prisma.fundingFee.create({
-            data: {
-              apiKeyId,
-              tranId,
-              incomeType: 'FUNDING_FEE',
-              asset: fee.currency || 'USDT',
-              symbol: dbSymbol,
-              amount: fee.amount ?? 0,
-              amountUsd: fee.amount ?? 0,
-              timestamp: new Date(fee.timestamp),
-            },
-          });
-        }
-        imported++;
-      } catch {
-        // 唯一约束冲突时静默跳过
-      }
-    }
+    const imported = await this.saveRecords(records);
 
     console.log(`[FundingFee] 入库 ${imported} 条新记录`);
 

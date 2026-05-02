@@ -14,12 +14,21 @@ export async function GET(request: NextRequest) {
     const user = await requireUser();
     const { searchParams } = new URL(request.url);
 
-    const apiKeyId = searchParams.get('apiKeyId') ? parseInt(searchParams.get('apiKeyId')!) : undefined;
+    const rawApiKeyId = searchParams.get('apiKeyId');
+    const apiKeyId = rawApiKeyId ? Number.parseInt(rawApiKeyId, 10) : undefined;
     const symbol = searchParams.get('symbol') || undefined;
     const startDate = searchParams.get('startDate') ? new Date(searchParams.get('startDate')!) : undefined;
     const endDate = searchParams.get('endDate') ? new Date(searchParams.get('endDate')!) : undefined;
     const page = parseInt(searchParams.get('page') || '1');
     const pageSize = parseInt(searchParams.get('pageSize') || '50');
+
+    if (rawApiKeyId && !Number.isInteger(apiKeyId)) {
+      return NextResponse.json({ error: 'apiKeyId 格式无效' }, { status: 400 });
+    }
+
+    if (apiKeyId !== undefined) {
+      await requireApiKeyOwner(apiKeyId, user.id);
+    }
 
     const result = await FundingFeeService.getFundingFees({
       apiKeyId,

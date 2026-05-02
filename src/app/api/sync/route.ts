@@ -37,6 +37,12 @@ export async function POST(request: NextRequest) {
     if (error instanceof AuthError) return authErrorResponse(error);
     console.error('Sync failed:', error);
     const errorMessage = error instanceof Error ? error.message : '同步失败';
+    if (errorMessage.includes('正在同步')) {
+      return NextResponse.json(
+        { error: errorMessage },
+        { status: 409 }
+      );
+    }
     return NextResponse.json(
       { error: errorMessage },
       { status: 500 }

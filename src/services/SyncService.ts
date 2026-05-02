@@ -66,22 +66,31 @@ export class SyncService {
    * @param forceSync 强制同步（当时间超过90天时，前端确认后传入）
    */
   static async syncApiKey(apiKeyId: number, forceSync?: boolean): Promise<SyncResult> {
-
-    // 1. 并发拦截验证
+    // 1. 读取归属用户
     const apiKeyDb = await prisma.apiKey.findUnique({
       where: { id: apiKeyId },
-      select: { syncStatus: true, userId: true }
+      select: { userId: true }
     });
 
     if (!apiKeyDb) throw new Error('API Key 不存在');
-    if (apiKeyDb.syncStatus === 'SYNCING') {
-      console.warn(`API Key ${apiKeyId} 正在同步中，拦截重复请求`);
-      throw new Error('数据正在同步中，请勿重复触发'); // 给前端抛出友好提示
-    }
 
-    // 2. 状态放行并锁定
-    // 更新状态为同步中
-    await ApiKeyService.updateSyncStatus(apiKeyId, 'SYNCING', undefined, apiKeyDb.userId);
+    // 2. 原子抢锁：仅非 SYNCING 状态可切换为 SYNCING
+    const lockResult = await prisma.apiKey.updateMany({
+      where: {
+        id: apiKeyId,
+        userId: apiKeyDb.userId,
+        syncStatus: { not: 'SYNCING' },
+      },
+      data: {
+        syncStatus: 'SYNCING',
+        errorMessage: null,
+      },
+    });
+
+    if (lockResult.count === 0) {
+      console.warn(`API Key ${apiKeyId} 正在同步中，拦截重复请求`);
+      throw new Error('数据正在同步中，请勿重复触发');
+    }
 
     try {
       // 获取 API Key (包含解密的凭证)
@@ -305,8 +314,9 @@ export class SyncService {
       // 批量保存到数据库
       const importedCount = await this.saveTradesBatch(uniqueTrades, apiKeyId);
 
-      // ── 全量重聚合 ─────────────────────────────────────────────────────
-      const result = await this.recalculateLegs(apiKeyId, userId);
+      // ── 按受影响币种重聚合 ─────────────────────────────────────────────
+      const affectedSymbols = [...new Set(uniqueTrades.map(t => t.symbol))];
+      const result = await this.recalculateLegs(apiKeyId, userId, affectedSymbols);
 
       // 更新同步状态
       await ApiKeyService.updateSyncStatus(apiKeyId, 'COMPLETED', undefined, userId);
@@ -506,11 +516,16 @@ export class SyncService {
   }
 
   /**
-   * 辅助方法：重新聚合所有 Legs
+   * 辅助方法：按受影响币种重新聚合 Legs（内存全量计算 + 数据库精准覆盖）
    */
-  private static async recalculateLegs(apiKeyId: number, userId: number) {
+  private static async recalculateLegs(apiKeyId: number, userId: number, affectedSymbols?: string[]) {
+    const where: any = { apiKeyId };
+    if (affectedSymbols?.length) {
+      where.symbol = { in: affectedSymbols };
+    }
+
     const allDbTrades = await prisma.trade.findMany({
-      where: { apiKeyId },
+      where,
       orderBy: { timestamp: 'asc' },
       select: {
         id: true,
@@ -544,7 +559,7 @@ export class SyncService {
     }));
 
     const legs = aggregateTradesToLegs(tradesForAggregation);
-    return await this.saveLegsBatch(legs, userId);
+    return await this.saveLegsBatch(legs, userId, affectedSymbols);
   }
   
   /**
@@ -590,11 +605,12 @@ export class SyncService {
   }
   
   /**
-   * 批量保存/更新 Legs (性能优化版：内存映射减少数据库 IO)
+   * 批量保存/更新 Legs (内存映射 + 按受影响币种精准覆盖)
    */
   private static async saveLegsBatch(
     legs: any[],
-    userId: number
+    userId: number,
+    affectedSymbols?: string[]
   ): Promise<{ created: number; updated: number; newLegIds: number[] }> {
     if (legs.length === 0) return { created: 0, updated: 0, newLegIds: [] };
 
@@ -602,16 +618,19 @@ export class SyncService {
     let updatedCount = 0;
     const newLegIds: number[] = [];
 
-    // 1. 一次性获取该用户的所有相关交易对的现有 Leg，存入内存 Map
-    // 这种做法将 O(N) 次 DB 查询降为 O(1)
+    // 1. 获取受影响币种的现有 Leg（而非全量），存入内存 Map
     const existingLegs = await prisma.leg.findMany({
-      where: { userId },
+      where: { 
+        userId,
+        ...(affectedSymbols?.length ? { symbol: { in: affectedSymbols } } : {})
+      },
       select: { 
         id: true, 
         symbol: true, 
         openDate: true, 
         side: true, 
-        status: true 
+        status: true,
+        fundingFeeUsd: true,
       }
     });
 
@@ -641,7 +660,9 @@ export class SyncService {
             averageExit: leg.averageExit,
             realisedPnL: leg.realisedPnL || 0,
             realisedPnLusd: leg.realisedPnLusd || 0,
-            netPnL: (leg.realisedPnLusd || 0) - (leg.commission || 0),
+            netPnL: existingLeg
+              ? (leg.realisedPnLusd || 0) - (leg.commission || 0) + ((existingLeg as any).fundingFeeUsd || 0)
+              : (leg.realisedPnLusd || 0) - (leg.commission || 0),
             commission: leg.commission || 0,
             commissionUsd: leg.commission || 0,
             duration: leg.duration,
