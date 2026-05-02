@@ -44,43 +44,50 @@ export class BinanceCsvService {
     const headerMap = new Map<string, number>();
     headers.forEach((h, i) => headerMap.set(h, i));
 
-    // 优先使用自定义映射，否则使用默认匹配
+    // 优先使用自定义映射，否则使用默认匹配（支持中英文表头）
     const timeIdx = headerMapping?.time 
       ? (headerMap.get(headerMapping.time.toLowerCase()) ?? -1)
-      : (headerMap.get('time(utc)') ?? headerMap.get('date(utc)') ?? -1);
+      : (headerMap.get('time(utc)') ?? headerMap.get('date(utc)') ?? headerMap.get('时间') ?? -1);
     const symbolIdx = headerMapping?.symbol
       ? (headerMap.get(headerMapping.symbol.toLowerCase()) ?? -1)
-      : (headerMap.get('symbol') ?? -1);
+      : (headerMap.get('symbol') ?? headerMap.get('代币名称/币种名称/币对') ?? headerMap.get('代币名称') ?? headerMap.get('币种名称') ?? headerMap.get('币对') ?? -1);
     const sideIdx = headerMapping?.side
       ? (headerMap.get(headerMapping.side.toLowerCase()) ?? -1)
-      : (headerMap.get('side') ?? -1);
+      : (headerMap.get('side') ?? headerMap.get('方向') ?? -1);
     const posSideIdx = headerMapping?.positionSide
       ? (headerMap.get(headerMapping.positionSide.toLowerCase()) ?? -1)
-      : (headerMap.get('position side') ?? -1);
+      : (headerMap.get('position side') ?? headerMap.get('仓位方向') ?? -1);
     const priceIdx = headerMapping?.price
       ? (headerMap.get(headerMapping.price.toLowerCase()) ?? -1)
-      : (headerMap.get('price') ?? -1);
+      : (headerMap.get('price') ?? headerMap.get('价格') ?? -1);
     const qtyIdx = headerMapping?.quantity
       ? (headerMap.get(headerMapping.quantity.toLowerCase()) ?? -1)
-      : (headerMap.get('quantity') ?? headerMap.get('qty') ?? -1);
+      : (headerMap.get('quantity') ?? headerMap.get('qty') ?? headerMap.get('数量') ?? -1);
     const feeIdx = headerMapping?.fee
       ? (headerMap.get(headerMapping.fee.toLowerCase()) ?? -1)
-      : (headerMap.get('fee') ?? headerMap.get('commission') ?? -1);
+      : (headerMap.get('fee') ?? headerMap.get('commission') ?? headerMap.get('手续费') ?? -1);
     const feeAssetIdx = headerMapping?.feeAsset
       ? (headerMap.get(headerMapping.feeAsset.toLowerCase()) ?? -1)
       : (headerMap.get('fee asset') ?? headerMap.get('commission asset') ?? headerMap.get('asset') ?? -1);
     const tradeIdIdx = headerMapping?.tradeId
       ? (headerMap.get(headerMapping.tradeId.toLowerCase()) ?? -1)
-      : (headerMap.get('trade id') ?? -1);
+      : (headerMap.get('trade id') ?? headerMap.get('交易 id') ?? -1);
     const orderIdIdx = headerMapping?.orderId
       ? (headerMap.get(headerMapping.orderId.toLowerCase()) ?? -1)
-      : (headerMap.get('order id') ?? -1);
+      : (headerMap.get('order id') ?? headerMap.get('订单编号') ?? -1);
+
+    console.log('[CSV] 分隔符:', separator === '\t' ? 'Tab' : '逗号');
+    console.log('[CSV] 表头:', headers);
+    console.log('[CSV] headerMapping:', headerMapping);
+    console.log('[CSV] 列索引:', { timeIdx, symbolIdx, sideIdx, posSideIdx, priceIdx, qtyIdx, feeIdx, feeAssetIdx, tradeIdIdx, orderIdIdx });
 
     if (timeIdx === -1 || symbolIdx === -1 || sideIdx === -1 || priceIdx === -1 || qtyIdx === -1) {
       throw new Error('CSV 缺少必要的列 (时间, 交易对, 方向, 价格, 数量)');
     }
 
-    return rows.map((row) => {
+    console.log(`[CSV] 共 ${rows.length} 行数据`);
+
+    const allTrades = rows.map((row) => {
       // 简单处理逗号分隔，假设没有带逗号的引号内容
       const cols = row.split(separator).map(c => c.trim().replace(/^"|"$/g, ''));
       
@@ -125,9 +132,30 @@ export class BinanceCsvService {
         feeUsd = (price * amount) * 0.00075;
       }
 
-      // 确保日期字符串能够被正确解析为 UTC 时间
-      const normalizedDateStr = dateStr.includes('Z') || dateStr.includes('+') ? dateStr : `${dateStr} Z`;
-      const timestamp = new Date(normalizedDateStr);
+      // 日期解析
+      let timestamp: Date;
+      const d = dateStr.trim();
+
+      if (d.includes('T') || d.includes('Z') || d.includes('+')) {
+        // 已是 ISO 格式
+        timestamp = new Date(d);
+      } else if (/^\d{2}-\d{2}-\d{2}\s/.test(d)) {
+        // YY-MM-DD HH:MM:SS
+        const parts = d.split(/[\s-:]/);
+        if (parts.length >= 5) {
+          const [yy, mm, dd, hh, mi, ss] = parts;
+          const year = parseInt(yy) < 50 ? 2000 + parseInt(yy) : 1900 + parseInt(yy);
+          timestamp = new Date(year, parseInt(mm) - 1, parseInt(dd), parseInt(hh), parseInt(mi), parseInt(ss || '0'));
+        } else {
+          timestamp = new Date(d);
+        }
+      } else {
+        // YYYY/MM/DD HH:MM 或 YYYY-MM-DD HH:MM:SS → 转 ISO 格式再解析
+        const normalized = d.replace(/\//g, '-');
+        // 补齐秒数
+        const withSeconds = normalized.replace(/(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})$/, '$1:00');
+        timestamp = new Date(withSeconds + 'Z');
+      }
       const tradeId = sanitizeTradeIdentifier(tradeIdIdx !== -1 ? cols[tradeIdIdx] : null);
       const orderId = sanitizeTradeIdentifier(orderIdIdx !== -1 ? cols[orderIdIdx] : null);
       const id = buildTradeFingerprint({
@@ -157,6 +185,13 @@ export class BinanceCsvService {
         feeUsd,
         timestamp,
       };
-    }).filter(t => t.symbol && !isNaN(t.timestamp.getTime()));
+    });
+
+    const filtered = allTrades.filter(t => t.symbol && !isNaN(t.timestamp.getTime()));
+    console.log(`[CSV] 解析 ${allTrades.length} 条，过滤后 ${filtered.length} 条`);
+    if (allTrades.length > 0 && filtered.length === 0) {
+      console.log('[CSV] 首条被过滤的示例:', JSON.stringify(allTrades[0], null, 2));
+    }
+    return filtered;
   }
 }

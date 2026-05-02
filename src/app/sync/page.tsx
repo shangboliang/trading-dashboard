@@ -35,25 +35,25 @@ export default function SyncPage() {
 
   // 订单 CSV 字段映射
   const TRADE_MAPPING_FIELDS = [
-    { key: 'time', label: '时间', required: true, defaultNames: ['time(utc)'] },
-    { key: 'symbol', label: '交易对', required: true, defaultNames: ['symbol'] },
-    { key: 'side', label: '方向', required: true, defaultNames: ['side'] },
-    { key: 'positionSide', label: '仓位方向', required: false, defaultNames: ['position side'] },
-    { key: 'price', label: '价格', required: true, defaultNames: ['price'] },
-    { key: 'quantity', label: '数量', required: true, defaultNames: ['quantity'] },
-    { key: 'fee', label: '手续费', required: false, defaultNames: ['fee'] },
-    { key: 'tradeId', label: '成交ID', required: false, defaultNames: ['trade id'] },
-    { key: 'orderId', label: '订单ID', required: false, defaultNames: ['order id'] },
+    { key: 'time', label: '时间', required: true, defaultNames: ['time(utc)', 'date(utc)', '时间'] },
+    { key: 'symbol', label: '交易对', required: true, defaultNames: ['symbol', '代币名称/币种名称/币对', '代币名称', '币种名称', '币对'] },
+    { key: 'side', label: '方向', required: true, defaultNames: ['side', '方向'] },
+    { key: 'positionSide', label: '仓位方向', required: false, defaultNames: ['position side', '仓位方向'] },
+    { key: 'price', label: '价格', required: true, defaultNames: ['price', '价格'] },
+    { key: 'quantity', label: '数量', required: true, defaultNames: ['quantity', 'qty', '数量'] },
+    { key: 'fee', label: '手续费', required: false, defaultNames: ['fee', 'commission', '手续费'] },
+    { key: 'tradeId', label: '成交ID', required: false, defaultNames: ['trade id', '交易 id'] },
+    { key: 'orderId', label: '订单ID', required: false, defaultNames: ['order id', '订单编号'] },
   ];
 
   // 资金费 CSV 字段映射
   const FUNDING_MAPPING_FIELDS = [
-    { key: 'time', label: '时间', required: true, defaultNames: ['time(utc)', 'time'] },
-    { key: 'type', label: '类型', required: true, defaultNames: ['type', 'incometype', 'income type'] },
-    { key: 'amount', label: '金额', required: true, defaultNames: ['amount', 'income'] },
-    { key: 'asset', label: '资产', required: false, defaultNames: ['asset'] },
+    { key: 'time', label: '时间', required: true, defaultNames: ['time(utc)', 'time', '时间'] },
+    { key: 'type', label: '类型', required: true, defaultNames: ['type', 'incometype', 'income type', '类型'] },
+    { key: 'amount', label: '金额', required: true, defaultNames: ['amount', 'income', '金额'] },
+    { key: 'asset', label: '资产', required: false, defaultNames: ['asset', '资产'] },
     { key: 'symbol', label: '交易对', required: true, defaultNames: ['symbol', '代币名称/币种名称/币对', '代币名称', '币种名称', '币对'] },
-    { key: 'tranId', label: '交易ID', required: false, defaultNames: ['trade id', 'tradeid', '交易 id', 'tranid'] },
+    { key: 'tranId', label: '交易ID', required: false, defaultNames: ['trade id', 'tradeid', '交易 id', '交易id', 'tranid'] },
   ];
 
   // 加载账户列表

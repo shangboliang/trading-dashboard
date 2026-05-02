@@ -59,16 +59,16 @@ export class IncomeCsvService {
     headers.forEach((h, i) => headerMap.set(h, i));
     console.log('[IncomeCsv] 表头映射:', Object.fromEntries(headerMap));
 
-    // 优先使用自定义映射，否则使用默认匹配
+    // 优先使用自定义映射，否则使用默认匹配（支持中英文表头）
     const timeIdx = headerMapping?.time
       ? (headerMap.get(headerMapping.time.toLowerCase()) ?? -1)
-      : (headerMap.get('time(utc)') ?? headerMap.get('time') ?? -1);
+      : (headerMap.get('time(utc)') ?? headerMap.get('time') ?? headerMap.get('时间') ?? -1);
     const typeIdx = headerMapping?.type
       ? (headerMap.get(headerMapping.type.toLowerCase()) ?? -1)
-      : (headerMap.get('type') ?? headerMap.get('incometype') ?? headerMap.get('income type') ?? -1);
+      : (headerMap.get('type') ?? headerMap.get('incometype') ?? headerMap.get('income type') ?? headerMap.get('类型') ?? -1);
     const amountIdx = headerMapping?.amount
       ? (headerMap.get(headerMapping.amount.toLowerCase()) ?? -1)
-      : (headerMap.get('amount') ?? headerMap.get('income') ?? -1);
+      : (headerMap.get('amount') ?? headerMap.get('income') ?? headerMap.get('金额') ?? -1);
     const assetIdx = headerMapping?.asset
       ? (headerMap.get(headerMapping.asset.toLowerCase()) ?? -1)
       : (headerMap.get('asset') ?? headerMap.get('资产') ?? -1);
@@ -77,7 +77,7 @@ export class IncomeCsvService {
       : (headerMap.get('symbol') ?? headerMap.get('代币名称/币种名称/币对') ?? headerMap.get('代币名称') ?? headerMap.get('币种名称') ?? headerMap.get('币对') ?? -1);
     const tranIdIdx = headerMapping?.tranId
       ? (headerMap.get(headerMapping.tranId.toLowerCase()) ?? -1)
-      : (headerMap.get('trade id') ?? headerMap.get('tradeid') ?? headerMap.get('交易 id') ?? headerMap.get('tranid') ?? -1);
+      : (headerMap.get('trade id') ?? headerMap.get('tradeid') ?? headerMap.get('交易 id') ?? headerMap.get('交易id') ?? headerMap.get('tranid') ?? -1);
 
     console.log('[IncomeCsv] 列索引:', { timeIdx, typeIdx, amountIdx, assetIdx, symbolIdx, tranIdIdx });
 

@@ -110,8 +110,19 @@ export class SyncService {
       // 跳过 fetchCurrencies（需要提现权限，且在国内网络易超时）
       exchange.options['fetchCurrencies'] = false;
 
-      // 加载市场数据（会自动同步服务器时间）
+      // 加载市场数据
       const markets = await exchange.loadMarkets();
+
+      // 主动同步服务器时间，避免 -1021 Timestamp 错误
+      // loadMarkets() 不一定触发 adjustForTimeDifference，手动 fetchTime 确保同步
+      try {
+        const serverTime = await exchange.fetchTime();
+        const localTime = Date.now();
+        exchange.options['timeDifference'] = localTime - serverTime;
+        console.log(`[Sync] 服务器时间同步: 本地时差 ${exchange.options['timeDifference']}ms`);
+      } catch (e) {
+        console.warn('[Sync] fetchTime 失败，使用默认时间差:', e instanceof Error ? e.message : e);
+      }
 
       // ═══════════════════════════════════════════════════════════════════════
       // 时间范围确定
@@ -758,7 +769,9 @@ export class SyncService {
       const trades: any[] = await this.callWithRetry(() =>
         exchange.fetchMyTrades(symbol, startTime, limit, {
           endTime: windowEnd,
-        })
+        }),
+        3,
+        exchange
       );
 
       if (!trades || trades.length === 0) {
@@ -849,7 +862,9 @@ export class SyncService {
           startTime: currentTime,
           endTime,
           limit,
-        })
+        }),
+        3,
+        exchange
       );
 
       if (!batch || batch.length === 0) {
@@ -882,7 +897,7 @@ export class SyncService {
    * @param fn 要执行的异步函数
    * @param maxRetries 最大重试次数
    */
-  private static async callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  private static async callWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, exchange?: any): Promise<T> {
     for (let i = 0; i <= maxRetries; i++) {
       try {
         return await fn();
@@ -891,6 +906,14 @@ export class SyncService {
         const isTimestampError = msg.includes('-1021') || msg.includes('Timestamp') || msg.includes('ahead of the server');
         if (isTimestampError && i < maxRetries) {
           console.warn(`[Retry] 时间戳错误，${i + 1}/${maxRetries} 次重试...`);
+          // 重新同步服务器时间
+          if (exchange) {
+            try {
+              const serverTime = await exchange.fetchTime();
+              exchange.options['timeDifference'] = Date.now() - serverTime;
+              console.log(`[Retry] 重新同步时差: ${exchange.options['timeDifference']}ms`);
+            } catch { /* ignore */ }
+          }
           await new Promise(r => setTimeout(r, 1000 * (i + 1)));
           continue;
         }

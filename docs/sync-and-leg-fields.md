@@ -444,3 +444,33 @@ exitQuality = (exitPrice - worstPrice) / (bestPrice - worstPrice) × 100
 | `src/lib/trade-aggregator.ts` | 交易归集引擎 |
 | `src/lib/trade-identity.ts` | 交易指纹/去重 |
 | `prisma/schema.prisma` | 数据库 Schema |
+
+---
+
+## 7. 性能优化备忘（未实现）
+
+### 7.1 问题背景
+
+当前 trade 拉取策略：先通过 COMMISSION 发现活跃 symbol，再对每个 symbol 扫描完整时间窗口（90 天 = 13 个 7 天窗口）。若某 symbol 仅在 1 天有交易，仍需 13 次 API 调用。
+
+```
+当前: 20 币种 × 13 窗口 = 260 次 API 调用
+```
+
+### 7.2 优化思路
+
+COMMISSION 记录自带 `time` 字段，可按 symbol 分组聚合活跃时间点，只查询有交易的时间窗口，合并临近窗口并加缓冲。
+
+```
+优化后: 仅查询有交易的窗口，低频币种可降至 1-3 次/币种
+```
+
+### 7.3 实现要点
+
+1. `fetchActiveSymbolsViaCommission` 返回值从 `string[]` 改为 `Map<string, number[]>`（symbol → 时间戳列表）
+2. 相邻 < 7 天的时间点合并为一个查询窗口，前后各加 1-2 小时缓冲（COMMISSION 结算时间 ≠ 成交时间）
+3. `fetchMyTradesWithPagination` 改为接收多个时间窗口而非单一 since-endTime
+
+### 7.4 触发条件
+
+用户反馈同步耗时过长，或活跃 symbol 数量 > 30 时考虑实现。

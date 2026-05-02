@@ -97,15 +97,16 @@ export class FundingFeeService {
   }
 
   /**
-   * 批量保存资金费记录（upsert 防重）
+   * 批量保存资金费记录（幂等防重）
+   *
+   * 有 tranId 时用 @@unique([apiKeyId, tranId, incomeType]) 去重；
+   * 无 tranId 时先按 (apiKeyId, symbol, timestamp) 查重，不存在才插入。
    */
   private static async saveRecords(records: RawIncomeRecord[]): Promise<number> {
     let imported = 0;
 
     for (const record of records) {
       try {
-        // 如果有 tranId，使用 tranId + incomeType 去重
-        // 如果没有 tranId，使用 symbol + timestamp 去重
         if (record.tranId) {
           await prisma.fundingFee.upsert({
             where: {
@@ -126,19 +127,23 @@ export class FundingFeeService {
               info: record.info,
               timestamp: record.timestamp,
             },
-            update: {}, // 已存在则不更新
+            update: {},
           });
         } else {
-          // 没有 tranId 时，使用 symbol + timestamp 去重
-          await prisma.fundingFee.upsert({
+          const existing = await prisma.fundingFee.findFirst({
             where: {
-              // 需要一个唯一约束来支持 upsert，这里使用 tranId 为 null 的情况
-              // 由于 tranId 可以是 null，我们需要特殊处理
-              id: -1, // 不会匹配到任何记录，强制走 create
-            },
-            create: {
               apiKeyId: record.apiKeyId,
-              tranId: record.tranId,
+              symbol: record.symbol,
+              timestamp: record.timestamp,
+              tranId: null,
+            },
+          });
+          if (existing) continue;
+
+          await prisma.fundingFee.create({
+            data: {
+              apiKeyId: record.apiKeyId,
+              tranId: null,
               incomeType: record.incomeType,
               asset: record.asset,
               symbol: record.symbol,
@@ -147,7 +152,6 @@ export class FundingFeeService {
               info: record.info,
               timestamp: record.timestamp,
             },
-            update: {},
           });
         }
         imported++;
@@ -162,32 +166,35 @@ export class FundingFeeService {
 
   /**
    * 将 FundingFee 按 (symbol + 时间区间) 关联到 Leg，并刷新 Leg.fundingFeeUsd / netPnL
-   * 支持全量归集（所有未关联的 fee）和增量归集（只处理新 fee）
+   *
+   * 查所有该 apiKeyId 的 fee（含已关联的），重新按时间窗口匹配。
+   * 这样即使 Leg 被删除重建（onDelete: SetNull 清空 legId），或 Leg 时间窗口变化，
+   * 都能正确重新归集。
    */
   static async associateWithLegs(apiKeyId: number): Promise<{ associated: number; legsUpdated: number }> {
-    const unlinked = await prisma.fundingFee.findMany({
-      where: { apiKeyId, legId: null },
-    });
-
-    if (unlinked.length === 0) {
-      console.log('[FundingFee] 没有未归集的资金费');
-      return { associated: 0, legsUpdated: 0 };
-    }
-
-    console.log(`[FundingFee] 关联 ${unlinked.length} 条未归集资金费到 Leg...`);
-
     const apiKeyRow = await prisma.apiKey.findUnique({
       where: { id: apiKeyId },
       select: { userId: true },
     });
     if (!apiKeyRow) return { associated: 0, legsUpdated: 0 };
 
+    // 查所有 fee（包括已关联的），用于重新匹配
+    const allFees = await prisma.fundingFee.findMany({
+      where: { apiKeyId },
+    });
+
+    if (allFees.length === 0) {
+      console.log('[FundingFee] 无资金费记录');
+      return { associated: 0, legsUpdated: 0 };
+    }
+
+    console.log(`[FundingFee] 重新归集 ${allFees.length} 条资金费...`);
+
     let associated = 0;
     const updatedLegIds = new Set<number>();
 
-    // 按 symbol 分组，批量查 Leg，减少 N+1 查询
-    const bySymbol: Record<string, typeof unlinked> = {};
-    for (const f of unlinked) {
+    const bySymbol: Record<string, typeof allFees> = {};
+    for (const f of allFees) {
       (bySymbol[f.symbol] ??= []).push(f);
     }
 
@@ -197,21 +204,22 @@ export class FundingFeeService {
         orderBy: { openDate: 'asc' },
       });
 
-      // 为每条资金费找到它落在哪个 Leg 的时间窗口
       for (const fee of fees) {
         const leg = legs.find(
           l =>
             l.openDate <= fee.timestamp &&
             (l.closeDate === null || l.closeDate >= fee.timestamp)
         );
-        if (!leg) continue;
 
-        await prisma.fundingFee.update({
-          where: { id: fee.id },
-          data: { legId: leg.id },
-        });
-        associated++;
-        updatedLegIds.add(leg.id);
+        const newLegId = leg?.id ?? null;
+        if (fee.legId !== newLegId) {
+          await prisma.fundingFee.update({
+            where: { id: fee.id },
+            data: { legId: newLegId },
+          });
+          associated++;
+          if (newLegId !== null) updatedLegIds.add(newLegId);
+        }
       }
     }
 

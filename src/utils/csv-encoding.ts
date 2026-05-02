@@ -1,6 +1,6 @@
 /**
  * 自动检测 CSV 文件编码并解码为字符串
- * 支持 UTF-8 BOM 和 GBK（Windows Excel 导出的中文 CSV）
+ * 优先尝试 UTF-8（无 BOM 也尝试），检测到乱码则回退 GBK
  */
 export function decodeCsv(arrayBuffer: ArrayBuffer): string {
   const uint8 = new Uint8Array(arrayBuffer);
@@ -10,6 +10,12 @@ export function decodeCsv(arrayBuffer: ArrayBuffer): string {
     return new TextDecoder('utf-8').decode(arrayBuffer);
   }
 
-  // 兜底 GBK（覆盖 gb2312，支持更多生僻字）
+  // 优先尝试 UTF-8，如果解码后出现替换字符 U+FFFD 则说明不是 UTF-8
+  const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(arrayBuffer);
+  if (!utf8.includes('\uFFFD')) {
+    return utf8;
+  }
+
+  // 回退 GBK（Windows Excel 导出的中文 CSV）
   return new TextDecoder('gbk').decode(arrayBuffer);
 }
