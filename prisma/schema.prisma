@@ -40,6 +40,8 @@ model User {
   tags          Tag[]
   settings      UserSettings?
   sessions      Session[]
+  aiConfigs     AiConfig[]
+  aiReports     AiReport[]
   
   /// 账号注册时间
   createdAt     DateTime   @default(now())
@@ -569,4 +571,112 @@ model FundingFee {
   @@index([symbol])
   @@index([timestamp])
   @@index([tranId])
+}
+
+// ============================================
+// 9. AI 交易报告
+// ============================================
+
+enum AiProvider {
+  OPENAI       // OpenAI / DeepSeek / Moonshot / 通义千问 等兼容 API
+  ANTHROPIC    // Claude
+  GEMINI       // Google Gemini
+}
+
+enum ReportStatus {
+  GENERATING
+  COMPLETED
+  FAILED
+}
+
+/// 用户 AI 模型配置表：存储用户配置的 AI API 凭证
+model AiConfig {
+  /// 内部主键
+  id          Int        @id @default(autoincrement())
+  /// 外部唯一标识
+  uuid        String     @unique @default(cuid())
+  /// 归属用户 ID
+  userId      Int
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// 配置名称（如 "DeepSeek"、"GPT-4o"）
+  name        String
+  /// AI 服务商
+  provider    AiProvider
+  /// API Key（AES-256-GCM 加密存储，格式 iv:tag:encrypted）
+  apiKey      String
+  /// 自定义 API 地址（OpenAI 兼容模式，为空则用默认地址）
+  baseUrl     String?
+  /// 模型名称（如 "deepseek-chat"、"gpt-4o"、"claude-sonnet-4-20250514"）
+  modelName   String
+  /// 生成温度 (0.0 - 2.0)，控制输出随机性
+  temperature Float      @default(0.7)
+  /// 最大输出 token 数
+  maxTokens   Int        @default(4096)
+  /// 默认人设基调：strict(魔鬼教官) / gentle(心理导师) / objective(量化机器)
+  defaultTone String     @default("objective")
+  /// 用户自定义指令（追加到提示词末尾的关注点）
+  customInstruction String? @db.Text
+  /// 是否为默认配置
+  isDefault   Boolean    @default(false)
+
+  /// 创建时间
+  createdAt   DateTime   @default(now())
+  /// 更新时间
+  updatedAt   DateTime   @updatedAt
+
+  reports     AiReport[]
+
+  @@index([userId])
+}
+
+/// AI 生成的交易报告表
+model AiReport {
+  /// 内部主键
+  id           Int          @id @default(autoincrement())
+  /// 外部唯一标识
+  uuid         String       @unique @default(cuid())
+  /// 归属用户 ID
+  userId       Int
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// 使用的 AI 配置 ID
+  aiConfigId   Int
+  aiConfig     AiConfig     @relation(fields: [aiConfigId], references: [id], onDelete: Cascade)
+
+  /// 报告标题（如 "3月第四周深度复盘"）
+  title        String
+  /// 使用的 AI 服务商
+  provider     AiProvider
+  /// 使用的模型名称
+  modelName    String
+
+  /// 报告覆盖的开始日期
+  startDate    DateTime
+  /// 报告覆盖的结束日期
+  endDate      DateTime
+  /// 生成报告时使用的筛选条件 (JSON)
+  filters      Json?
+
+  /// 输入给 LLM 的 CSV 数据
+  csvData      String       @db.Text
+  /// 完整的 System Prompt
+  promptUsed   String       @db.Text
+  /// LLM 返回的 Markdown 报告正文
+  content      String       @db.Text
+
+  /// AI 评估的综合得分（可选）
+  score        Float?
+  /// 报告生成状态
+  status       ReportStatus @default(GENERATING)
+  /// 生成失败时的错误信息
+  errorMessage String?
+
+  /// 创建时间
+  createdAt    DateTime     @default(now())
+  /// 更新时间
+  updatedAt    DateTime     @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
 }

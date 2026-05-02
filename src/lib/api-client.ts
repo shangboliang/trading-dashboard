@@ -312,6 +312,97 @@ export const analyticsApi = {
   getHourly: (filters?: GlobalFilter) => apiGet<HourlyStats[]>('/analytics/hourly', filters),
   getDuration: (filters?: GlobalFilter) => apiGet<DurationStats[]>('/analytics/duration', filters),
   getSize: (filters?: GlobalFilter) => apiGet<SizeStats[]>('/analytics/size', filters),
-  getDaily: (year?: number, month?: number, filters?: GlobalFilter) => 
+  getDaily: (year?: number, month?: number, filters?: GlobalFilter) =>
     apiGet<DailyPnL[]>('/analytics/daily', { year, month, ...filters }),
+};
+
+// ==================== AI 报告 API ====================
+
+export interface AiConfigItem {
+  id: number;
+  uuid: string;
+  name: string;
+  provider: 'OPENAI' | 'ANTHROPIC' | 'GEMINI';
+  baseUrl: string | null;
+  modelName: string;
+  temperature: number;
+  maxTokens: number;
+  defaultTone: string;
+  customInstruction: string | null;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AiReportItem {
+  id: number;
+  uuid: string;
+  title: string;
+  provider: string;
+  modelName: string;
+  startDate: string;
+  endDate: string;
+  score: number | null;
+  status: 'GENERATING' | 'COMPLETED' | 'FAILED';
+  errorMessage: string | null;
+  createdAt: string;
+}
+
+export interface AiReportDetail extends AiReportItem {
+  filters: Record<string, any> | null;
+  csvData: string;
+  promptUsed: string;
+  content: string;
+}
+
+export const aiApi = {
+  // 报告
+  generate: (data: {
+    startDate: string;
+    endDate: string;
+    symbol?: string;
+    apiKeyId?: number;
+    aiConfigId?: number;
+    temperature?: number;
+    maxTokens?: number;
+    tone?: string;
+    customPrompt?: string;
+  }) => apiPost<AiReportDetail>('/ai', data),
+
+  getList: (params?: { page?: number; pageSize?: number }) =>
+    apiGet<{ data: AiReportItem[]; pagination: any }>('/ai', params),
+
+  getById: (id: number) => apiGet<AiReportDetail>(`/ai/${id}`),
+
+  delete: (id: number) => apiDelete(`/ai/${id}`),
+
+  // 配置
+  getConfigs: () => apiGet<AiConfigItem[]>('/ai/config'),
+
+  createConfig: (data: {
+    name: string;
+    provider: string;
+    apiKey: string;
+    baseUrl?: string;
+    modelName: string;
+    temperature?: number;
+    maxTokens?: number;
+    defaultTone?: string;
+    customInstruction?: string;
+    isDefault?: boolean;
+  }) => apiPost<AiConfigItem>('/ai/config', data),
+
+  updateConfig: (id: number, data: {
+    name?: string;
+    apiKey?: string;
+    baseUrl?: string;
+    modelName?: string;
+    temperature?: number;
+    maxTokens?: number;
+    defaultTone?: string;
+    customInstruction?: string;
+    isDefault?: boolean;
+  }) => apiPut(`/ai/config/${id}`, data),
+
+  deleteConfig: (id: number) => apiDelete(`/ai/config/${id}`),
 };

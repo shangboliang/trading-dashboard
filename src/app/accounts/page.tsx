@@ -2,9 +2,10 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Card } from "@/components/Card";
-import { accountsApi, type ApiAccount } from "@/lib/api-client";
-import { Key, Plus, Trash2, Edit2, CheckCircle2, AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { accountsApi, aiApi, type ApiAccount, type AiConfigItem } from "@/lib/api-client";
+import { Key, Plus, Trash2, Edit2, CheckCircle2, AlertCircle, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { format } from "date-fns";
+import AiConfigModal from "@/components/AiConfigModal";
 
 const EXCHANGE_MAP: Record<string, string> = {
   BINANCE: 'binance',
@@ -28,6 +29,12 @@ export default function AccountsPage() {
     passphrase: ""
   });
 
+  // AI 配置状态
+  const [aiConfigs, setAiConfigs] = useState<AiConfigItem[]>([]);
+  const [aiLoading, setAiLoading] = useState(true);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [editingAiConfig, setEditingAiConfig] = useState<AiConfigItem | null>(null);
+
   const loadAccounts = useCallback(async () => {
     try {
       setLoading(true);
@@ -44,6 +51,39 @@ export default function AccountsPage() {
   useEffect(() => {
     loadAccounts();
   }, [loadAccounts]);
+
+  const loadAiConfigs = useCallback(async () => {
+    try {
+      setAiLoading(true);
+      const data = await aiApi.getConfigs();
+      setAiConfigs(data);
+    } catch (err) {
+      console.error('Failed to load AI configs:', err);
+    } finally {
+      setAiLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadAiConfigs();
+  }, [loadAiConfigs]);
+
+  const handleDeleteAiConfig = async (id: number) => {
+    if (confirm("确定要删除此 AI 配置吗？")) {
+      try {
+        await aiApi.deleteConfig(id);
+        loadAiConfigs();
+      } catch (err) {
+        alert('删除 AI 配置失败');
+      }
+    }
+  };
+
+  const PROVIDER_LABELS: Record<string, string> = {
+    OPENAI: 'OpenAI 兼容',
+    ANTHROPIC: 'Anthropic',
+    GEMINI: 'Gemini',
+  };
 
   const handleAdd = async () => {
     if (!newAccount.name || !newAccount.apiKey || !newAccount.apiSecret) {
@@ -172,6 +212,92 @@ export default function AccountsPage() {
           ))
         )}
       </div>
+
+      {/* ========== AI 模型配置区 ========== */}
+      <div className="border-t border-border pt-10 mt-10">
+        <header className="flex justify-between items-end mb-6">
+          <div>
+            <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+              <Sparkles size={22} className="text-blue-400" />
+              AI 模型配置
+            </h2>
+            <p className="text-textMuted mt-1">配置 AI 大模型以生成交易诊断报告</p>
+          </div>
+          <button
+            onClick={() => { setEditingAiConfig(null); setAiModalOpen(true); }}
+            className="bg-blue-600 text-white px-4 py-2 rounded-md text-sm hover:bg-blue-500 transition-colors shadow-lg shadow-blue-600/20 flex items-center gap-2"
+          >
+            <Plus size={16} /> 添加 AI 配置
+          </button>
+        </header>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {aiLoading ? (
+            <div className="col-span-full flex items-center justify-center h-32">
+              <Loader2 className="animate-spin text-blue-500" size={24} />
+            </div>
+          ) : aiConfigs.length === 0 ? (
+            <div className="col-span-full text-center text-textMuted py-8 bg-panel border border-border rounded-xl">
+              暂无 AI 配置，请点击右上角添加
+            </div>
+          ) : (
+            aiConfigs.map(config => (
+              <Card key={config.id} className="relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-1 h-full bg-blue-500"></div>
+                <div className="flex flex-col sm:flex-row justify-between items-start gap-4">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center shrink-0">
+                      <Sparkles size={20} className="text-blue-400" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-lg font-bold text-white flex flex-wrap items-center gap-2">
+                        <span className="truncate">{config.name}</span>
+                        {config.isDefault && (
+                          <span className="flex items-center gap-1 text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded-full border border-blue-500/20 whitespace-nowrap">
+                            默认
+                          </span>
+                        )}
+                      </h3>
+                      <div className="text-sm text-textMuted mt-1">
+                        {PROVIDER_LABELS[config.provider] || config.provider} · <span className="font-mono">{config.modelName}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 shrink-0">
+                    <button
+                      onClick={() => { setEditingAiConfig(config); setAiModalOpen(true); }}
+                      className="p-2 bg-background border border-border rounded-md text-textMuted hover:text-white transition-colors"
+                      title="编辑"
+                    >
+                      <Edit2 size={16} />
+                    </button>
+                    <button
+                      onClick={() => handleDeleteAiConfig(config.id)}
+                      className="p-2 bg-background border border-border rounded-md text-textMuted hover:text-loss transition-colors"
+                      title="删除"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+                {config.baseUrl && (
+                  <div className="mt-3 pt-3 border-t border-border text-xs text-textMuted">
+                    Base URL: <span className="font-mono text-textMain">{config.baseUrl}</span>
+                  </div>
+                )}
+              </Card>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* AI 配置弹窗 */}
+      <AiConfigModal
+        isOpen={aiModalOpen}
+        onClose={() => { setAiModalOpen(false); setEditingAiConfig(null); }}
+        onSaved={loadAiConfigs}
+        editConfig={editingAiConfig}
+      />
 
       {/* 添加新账号弹窗 */}
       {isAdding && (
