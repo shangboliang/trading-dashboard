@@ -44,7 +44,7 @@ async function testFundingHistory() {
       secret: apiKeyData.apiSecret,
       password: apiKeyData.passphrase,
       enableRateLimit: true,
-      httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+      httpsProxy: process.env.HTTPS_PROXY || undefined,
     });
 
     exchange.options['defaultType'] = 'future';

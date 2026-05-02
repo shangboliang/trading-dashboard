@@ -59,7 +59,7 @@ export async function POST(request: NextRequest) {
         password: apiKeyData.passphrase,
         enableRateLimit: true,
         timeout: 30000,
-        httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+        httpsProxy: process.env.HTTPS_PROXY || undefined,
       });
 
       // 4. 获取该账号下所有没有 mae 数据并且状态为 CLOSED 的 Leg

@@ -19,15 +19,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import ccxt from 'ccxt';
 import { AuthError, authErrorResponse, requireUser } from '@/lib/auth';
 
-// 开发环境走本地代理
-const proxyUrl =
-  process.env.NODE_ENV === 'development'
-    ? (process.env.HTTPS_PROXY || 'http://127.0.0.1:7890')
-    : undefined;
-
 // 初始化一个只读的币安实例用于公开数据请求
 const binance = new ccxt.binance({
-  httpsProxy: proxyUrl,
+  httpsProxy: process.env.HTTPS_PROXY || undefined,
   options: {
     'defaultType': 'future', // 强制走 fapi.binance.com
   }

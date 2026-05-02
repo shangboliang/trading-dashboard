@@ -107,8 +107,7 @@ export class SyncService {
         enableRateLimit: true,
         adjustForTimeDifference: true, // 自动调整时间差，避免 timestamp 错误
         // Node.js 不走系统代理，需要显式传入
-        httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
-        // httpsProxy: process.env.HTTPS_PROXY,
+        httpsProxy: process.env.HTTPS_PROXY || undefined,
       });
 
       // 强制使用合约/掉期类型
@@ -431,7 +430,7 @@ export class SyncService {
       apiKey: apiKeyDb.apiKey, // API Key 本身就是明文存储的
       secret: await ApiKeyService.decrypt(apiKeyDb.apiSecret), // 仅 Secret 是加密的
       enableRateLimit: true,
-      httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+      httpsProxy: process.env.HTTPS_PROXY || undefined,
     });
 
     // 申请下载 ID
@@ -492,7 +491,7 @@ export class SyncService {
       apiKey: apiKeyDb.apiKey,
       secret: await ApiKeyService.decrypt(apiKeyDb.apiSecret),
       enableRateLimit: true,
-      httpsProxy: process.env.NODE_ENV === 'development' ? 'http://127.0.0.1:7890' : undefined,
+      httpsProxy: process.env.HTTPS_PROXY || undefined,
     });
 
     const response = await (exchange as any).fapiPrivateGetTradeAsynId({
